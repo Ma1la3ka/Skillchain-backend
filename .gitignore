@@ -1,0 +1,18 @@
+# Environment Variables
+.env
+
+# Local Development Tools
+ngrok.exe
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE / Editor folders
+.vscode/
+.idea/
+
+# Virtual Environments
+venv/
+env/
