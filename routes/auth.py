@@ -15,7 +15,6 @@ def index():
         return redirect(url_for("dashboard"))
     return redirect(url_for("auth.login"))
 
-
 @auth_bp.route("/login", methods=["POST"])
 def login():
     data = request.get_json(silent=True) or {}
