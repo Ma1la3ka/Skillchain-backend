@@ -36,9 +36,9 @@ def login():
         session["user_id"] = user["id"]
         session["role"] = user["role"]
         redirect_url = (
-            "http://127.0.0.1:5501/Worker_dashboard/index.html"
+            "https://skillchain-frontend-omega.vercel.app//Worker_dashboard/index.html"
             if user["role"] == "worker"
-            else "http://127.0.0.1:5501/Client_dashboard/index.html"
+            else "https://skillchain-frontend-omega.vercel.app//Client_dashboard/index.html"
         )
         return jsonify({
             "success": True,
@@ -115,7 +115,7 @@ def register():
 
         return jsonify({
             "success": True,
-            "redirect": "http://127.0.0.1:5501/Login/index.html",
+            "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html",
             "squad": squad_data
         })
 
@@ -206,7 +206,7 @@ def reset_password():
         cur.execute("UPDATE password_reset_tokens SET used = 1 WHERE id = %s", (record["id"],))
         conn.commit()
         return jsonify({"success": True, "message": "Password updated!",
-                        "redirect": "http://127.0.0.1:5501/Login/index.html"})
+                        "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html"})
     except Exception as e:
         print(f"Reset password error: {e}")
         return jsonify({"success": False, "message": "Server error."}), 500
@@ -247,7 +247,7 @@ def reset_password_final():
         cur.execute("UPDATE password_reset_tokens SET used = 1 WHERE id = %s", (record["id"],))
         conn.commit()
         return jsonify({"success": True, "message": "Password updated!",
-                        "redirect": "http://127.0.0.1:5501/Login/index.html"})
+                        "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html"})
     except Exception as e:
         print(f"Reset error: {e}")
         return jsonify({"success": False, "message": "Server error."}), 500
@@ -282,9 +282,9 @@ def dashboard():
     if "user_id" not in session:
         return redirect(url_for("auth.login"))
     return redirect(
-        "http://127.0.0.1:5501/Worker_dashboard/index.html"
+        "https://skillchain-frontend-omega.vercel.app//Worker_dashboard/index.html"
         if session.get("role") == "worker"
-        else "http://127.0.0.1:5501/Client_dashboard/index.html"
+        else "https://skillchain-frontend-omega.vercel.app//Client_dashboard/index.html"
     )
 
 

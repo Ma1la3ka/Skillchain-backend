@@ -69,7 +69,7 @@ def squad_create_collection_account(job_id: int, amount: float, email: str) -> d
         "currency": "NGN",
         "initiate_type": "inline",
         "transaction_ref": reference,
-        "callback_url": "http://127.0.0.1:5501/Client_Dashboard/index.html"
+        "callback_url": "https://skillchain-frontend-omega.vercel.app//Client_Dashboard/index.html"
     }
 
     try:

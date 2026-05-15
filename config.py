@@ -20,17 +20,18 @@ else:
 
 # MySQL Database configuration
 DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "Ola01/2007"),
-    "database": os.getenv("DB_NAME", "skillchain"),
+    "host":     os.getenv("DB_HOST"),
+    "user":     os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME"),
+    "port":     int(os.getenv("DB_PORT", 3306)),
 }
 
 # Session configuration
 SESSION_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = False if ENV == "development" else True
 SESSION_COOKIE_HTTPONLY = True
-ALLOWED_ORIGINS = ["http://127.0.0.1:5501", "http://localhost:5501"]
+ALLOWED_ORIGINS = ["https://skillchain-frontend-omega.vercel.app/", "http://localhost:5501"]
 
 # Squad API headers
 SQUAD_HEADERS = {
