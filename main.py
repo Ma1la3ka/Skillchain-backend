@@ -14,6 +14,12 @@ def create_app():
     """Create and configure Flask application"""
     app = Flask(__name__)
 
+    CORS(app, supports_credentials=True, origins=[
+        "https://skillchain-frontend-omega.vercel.app",  # Your live frontend!
+        "http://localhost:5501",                         # So your local testing still works
+        "http://127.0.0.1:5501"                          # So your local testing still works
+    ])
+
     # Configuration
     app.secret_key = SECRET_KEY
     app.config["SESSION_COOKIE_SAMESITE"] = SESSION_COOKIE_SAMESITE
