@@ -7,6 +7,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from config import SQUAD_BASE_URL, SQUAD_HEADERS, MAIL_SERVER, MAIL_PORT, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
+from threading import Thread
 
 
 def haversine_distance(lat1, lng1, lat2, lng2):
@@ -151,8 +152,8 @@ def squad_payout(job, worker_id, cur):
         return reference
 
 
-def send_reset_email(email, token, user_name="User"):
-    """Send password reset email with token"""
+def _send_email_blocking(email, token, user_name="User"):
+    """Send password reset email - BLOCKING (run in background thread)"""
     try:
         # Create email content
         subject = "SkillChain - Password Reset Code"
@@ -206,24 +207,25 @@ def send_reset_email(email, token, user_name="User"):
         msg.attach(MIMEText(html_body, "html"))
         
         # Send email with timeout
-        try:
-            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=10) as server:
-                server.starttls(timeout=10)
-                server.login(MAIL_USERNAME, MAIL_PASSWORD)
-                server.send_message(msg)
-            
-            print(f"✓ Password reset email sent to {email}")
-            return True
-        except smtplib.SMTPAuthenticationError as auth_err:
-            print(f"✗ SMTP Auth Failed: Check MAIL_USERNAME/MAIL_PASSWORD - {auth_err}")
-            return False
-        except smtplib.SMTPException as smtp_err:
-            print(f"✗ SMTP Error: {smtp_err}")
-            return False
-        except TimeoutError as timeout_err:
-            print(f"✗ Email timeout (network issue): {timeout_err}")
-            return False
+        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=10) as server:
+            server.starttls(timeout=10)
+            server.login(MAIL_USERNAME, MAIL_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"✓ Password reset email sent to {email}")
     
     except Exception as e:
         print(f"✗ Failed to send email to {email}: {type(e).__name__}: {e}")
+
+
+def send_reset_email(email, token, user_name="User"):
+    """Send password reset email in background thread (non-blocking)"""
+    try:
+        # Send email in background thread so it doesn't block the request
+        thread = Thread(target=_send_email_blocking, args=(email, token, user_name), daemon=True)
+        thread.start()
+        print(f"[ASYNC] Email thread started for {email}")
+        return True
+    except Exception as e:
+        print(f"[ASYNC] Failed to start email thread: {e}")
         return False
