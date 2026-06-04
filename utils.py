@@ -219,13 +219,9 @@ def _send_email_blocking(email, token, user_name="User"):
 
 
 def send_reset_email(email, token, user_name="User"):
-    """Send password reset email in background thread (non-blocking)"""
-    try:
-        # Send email in background thread so it doesn't block the request
-        thread = Thread(target=_send_email_blocking, args=(email, token, user_name), daemon=True)
-        thread.start()
-        print(f"[ASYNC] Email thread started for {email}")
-        return True
-    except Exception as e:
-        print(f"[ASYNC] Failed to start email thread: {e}")
-        return False
+    """Send password reset email - runs synchronously with timeout"""
+    thread = Thread(target=_send_email_blocking, args=(email, token, user_name), daemon=False)
+    thread.start()
+    thread.join(timeout=15)  # wait up to 15 seconds
+    print(f"[EMAIL] Thread completed for {email}")
+    return True
