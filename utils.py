@@ -205,15 +205,25 @@ def send_reset_email(email, token, user_name="User"):
         msg.attach(MIMEText(text_body, "plain"))
         msg.attach(MIMEText(html_body, "html"))
         
-        # Send email
-        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
-            server.starttls()
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
-            server.send_message(msg)
-        
-        print(f"✓ Password reset email sent to {email}")
-        return True
+        # Send email with timeout
+        try:
+            with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=10) as server:
+                server.starttls(timeout=10)
+                server.login(MAIL_USERNAME, MAIL_PASSWORD)
+                server.send_message(msg)
+            
+            print(f"✓ Password reset email sent to {email}")
+            return True
+        except smtplib.SMTPAuthenticationError as auth_err:
+            print(f"✗ SMTP Auth Failed: Check MAIL_USERNAME/MAIL_PASSWORD - {auth_err}")
+            return False
+        except smtplib.SMTPException as smtp_err:
+            print(f"✗ SMTP Error: {smtp_err}")
+            return False
+        except TimeoutError as timeout_err:
+            print(f"✗ Email timeout (network issue): {timeout_err}")
+            return False
     
     except Exception as e:
-        print(f"✗ Failed to send email to {email}: {e}")
+        print(f"✗ Failed to send email to {email}: {type(e).__name__}: {e}")
         return False

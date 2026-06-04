@@ -139,45 +139,58 @@ def forgot_password():
     if not email:
         return jsonify({"success": False, "message": "Email is required."}), 400
 
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT id, name FROM users WHERE email = %s", (email,))
-    user = cur.fetchone()
-
-    if not user:
-        cur.close()
-        conn.close()
-        return jsonify({"success": True,
-                        "message": "If that email is registered, a code has been sent."})
-
-    token = str(random.randint(100000, 999999))
-    expiry = datetime.now() + timedelta(minutes=10)
-
     try:
-        cur.execute(
-            "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (%s, %s, %s)",
-            (user["id"], token, expiry)
-        )
-        conn.commit()
-        
-        print(f"\n{'='*40}")
-        print(f"PASSWORD RESET TOKEN for {email}: {token}")
-        print(f"Expires: {expiry}")
-        print(f"{'='*40}\n")
-        
-        # Send password reset email (non-blocking - won't crash if email fails)
+        conn = get_db()
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT id, name FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
+
+        if not user:
+            cur.close()
+            conn.close()
+            return jsonify({"success": True,
+                            "message": "If that email is registered, a code has been sent."})
+
+        token = str(random.randint(100000, 999999))
+        expiry = datetime.now() + timedelta(minutes=10)
+
         try:
-            send_reset_email(email, token, user.get("name", "User"))
-        except Exception as email_err:
-            print(f"Warning: Email send failed but token was generated: {email_err}")
+            cur.execute(
+                "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (%s, %s, %s)",
+                (user["id"], token, expiry)
+            )
+            conn.commit()
+            
+            print(f"\n{'='*50}")
+            print(f"[FORGOT PASSWORD] Email: {email}")
+            print(f"[FORGOT PASSWORD] Token: {token}")
+            print(f"[FORGOT PASSWORD] Expires: {expiry}")
+            print(f"{'='*50}\n")
+            
+            # Send password reset email (non-blocking)
+            email_sent = False
+            try:
+                email_sent = send_reset_email(email, token, user.get("name", "User"))
+            except Exception as email_err:
+                print(f"[FORGOT PASSWORD] Email send failed (non-critical): {email_err}")
+            
+            if email_sent:
+                msg = "Reset code has been sent to your email. Check your spam folder if not found."
+            else:
+                msg = "Reset code generated! If you don't receive an email, check your spam folder."
+            
+            return jsonify({"success": True, "message": msg})
         
-        return jsonify({"success": True, "message": "Reset code has been sent to your email."})
+        except Exception as db_err:
+            print(f"[FORGOT PASSWORD] Database error: {db_err}")
+            return jsonify({"success": False, "message": "Server error creating reset token."}), 500
+        finally:
+            cur.close()
+            conn.close()
+    
     except Exception as e:
-        print(f"Forgot password error: {e}")
-        return jsonify({"success": False, "message": "Server error."}), 500
-    finally:
-        cur.close()
-        conn.close()
+        print(f"[FORGOT PASSWORD] Unexpected error: {e}")
+        return jsonify({"success": False, "message": "Server error. Please try again."}), 500
 
 
 @auth_bp.route("/reset-password", methods=["GET", "POST"])

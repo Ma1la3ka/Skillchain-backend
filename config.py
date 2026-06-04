@@ -27,6 +27,29 @@ DB_CONFIG = {
     "port":     int(os.getenv("DB_PORT", 3306)),
 }
 
+# Validate database configuration on startup
+print(f"\n{'='*60}")
+print(f"[CONFIG] Database Configuration:")
+print(f"  Host: {DB_CONFIG.get('host')}")
+print(f"  Port: {DB_CONFIG.get('port')}")
+print(f"  User: {DB_CONFIG.get('user')}")
+print(f"  Database: {DB_CONFIG.get('database')}")
+print(f"  Password: {'*' * len(DB_CONFIG.get('password', '')) if DB_CONFIG.get('password') else 'NOT SET'}")
+print(f"[CONFIG] Mail Configuration:")
+print(f"  Server: {MAIL_SERVER}")
+print(f"  Port: {MAIL_PORT}")
+print(f"  Username: {MAIL_USERNAME}")
+print(f"  Sender: {MAIL_DEFAULT_SENDER}")
+print(f"{'='*60}\n")
+
+# Check for missing critical config
+if not DB_CONFIG.get('host'):
+    print("[WARNING] DB_HOST environment variable not set! Using None (will fail)")
+if not DB_CONFIG.get('user'):
+    print("[WARNING] DB_USER environment variable not set!")
+if not DB_CONFIG.get('password'):
+    print("[WARNING] DB_PASSWORD environment variable not set!")
+
 # Session configuration
 SESSION_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = False if ENV == "development" else True
