@@ -1,18 +1,15 @@
 """Utility functions for SkillChain Backend"""
 import math
 import uuid
-import json
+import os
 import requests as req
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from config import SQUAD_BASE_URL, SQUAD_HEADERS, MAIL_SERVER, MAIL_PORT, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
+from config import SQUAD_BASE_URL, SQUAD_HEADERS
 from threading import Thread
 
 
 def haversine_distance(lat1, lng1, lat2, lng2):
     """Calculate distance between two GPS coordinates in meters"""
-    R = 6_371_000  # Earth radius in meters
+    R = 6_371_000
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
     d_phi = math.radians(lat2 - lat1)
     d_lambda = math.radians(lng2 - lng1)
@@ -31,19 +28,17 @@ def squad_create_virtual_account(user_id, name, email, phone):
             "last_name": parts[-1] if len(parts) > 1 else "User",
             "mobile_num": phone or "08000000000",
             "email": email,
-            "bvn": "22222222222",  # Note: Live accounts require real BVNs
+            "bvn": "22222222222",
             "date_of_birth": "1990-01-01",
             "gender": "1",
             "transaction_limit": 5000000
         }
-
         resp = req.post(
             f"{SQUAD_BASE_URL}/virtual-account",
             json=payload,
             headers=SQUAD_HEADERS,
             timeout=10
         )
-
         data = resp.json()
         if resp.status_code in (200, 201) and data.get("success"):
             body = data.get("data", {})
@@ -55,7 +50,6 @@ def squad_create_virtual_account(user_id, name, email, phone):
     except Exception as e:
         print(f"Squad API error: {e}")
 
-    # Fallback for demo if API fails
     return {
         "account_number": f"909{user_id:07d}",
         "bank_name": "Squad Demo Bank",
@@ -66,7 +60,6 @@ def squad_create_virtual_account(user_id, name, email, phone):
 def squad_create_collection_account(job_id: int, amount: float, email: str) -> dict:
     """Create a collection account for escrow payment"""
     reference = f"job_{job_id}_{uuid.uuid4().hex[:8]}"
-
     payload = {
         "amount": int(amount * 100),
         "email": email,
@@ -75,7 +68,6 @@ def squad_create_collection_account(job_id: int, amount: float, email: str) -> d
         "transaction_ref": reference,
         "callback_url": "https://skillchain-frontend-omega.vercel.app//Client_Dashboard/index.html"
     }
-
     try:
         resp = req.post(
             f"{SQUAD_BASE_URL}/transaction/initiate",
@@ -121,17 +113,15 @@ def squad_payout(job, worker_id, cur):
 
     amount_kobo = int(float(job["amount"]) * 100)
     reference = f"pay_{job['id']}_{uuid.uuid4().hex[:8]}"
-
     payload = {
         "transaction_reference": reference,
         "amount": amount_kobo,
-        "bank_code": "000013",  # Squad sandbox payout bank code
+        "bank_code": "000013",
         "account_number": worker["squad_account_number"],
         "account_name": worker["name"],
         "currency_id": "NGN",
         "remark": f"SkillChain payment for job #{job['id']}"
     }
-
     try:
         resp = req.post(
             f"{SQUAD_BASE_URL}/payout/transfer",
@@ -141,7 +131,6 @@ def squad_payout(job, worker_id, cur):
         )
         data = resp.json()
         print(f"[payout] status={resp.status_code} body={data}")
-
         if resp.status_code in (200, 201):
             return reference
         else:
@@ -153,75 +142,65 @@ def squad_payout(job, worker_id, cur):
 
 
 def _send_email_blocking(email, token, user_name="User"):
-    """Send password reset email - BLOCKING (run in background thread)"""
+    """Send password reset email via Resend API"""
     try:
-        # Create email content
-        subject = "SkillChain - Password Reset Code"
-        
+        RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+        if not RESEND_API_KEY:
+            print("✗ RESEND_API_KEY not set in environment variables")
+            return
+
         html_body = f"""
         <html>
             <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
                 <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
                     <h2 style="color: #333; margin-bottom: 20px;">Password Reset Request</h2>
-                    
-                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
-                        Hi {user_name},
-                    </p>
-                    
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">Hi {user_name},</p>
                     <p style="color: #555; font-size: 16px; line-height: 1.6;">
                         We received a request to reset your SkillChain password. Use the code below to proceed:
                     </p>
-                    
                     <div style="background-color: #e85c00; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 30px 0; font-size: 28px; font-weight: bold; letter-spacing: 3px;">
                         {token}
                     </div>
-                    
-                    <p style="color: #555; font-size: 14px; line-height: 1.6;">
-                        <strong>This code expires in 10 minutes.</strong>
-                    </p>
-                    
-                    <p style="color: #555; font-size: 14px; line-height: 1.6;">
-                        If you didn't request this, please ignore this email or contact our support team.
-                    </p>
-                    
+                    <p style="color: #555; font-size: 14px;"><strong>This code expires in 10 minutes.</strong></p>
+                    <p style="color: #555; font-size: 14px;">If you didn't request this, please ignore this email.</p>
                     <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-                    
                     <p style="color: #999; font-size: 12px; text-align: center;">
                         SkillChain Team<br>
-                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #e85c00; text-decoration: none;">Visit SkillChain</a>
+                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #e85c00;">Visit SkillChain</a>
                     </p>
                 </div>
             </body>
         </html>
         """
-        
-        # Create message
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = subject
-        msg["From"] = MAIL_DEFAULT_SENDER
-        msg["To"] = email
-        
-        # Attach plain text and HTML
-        text_body = f"Your SkillChain password reset code is: {token}\n\nThis code expires in 10 minutes."
-        msg.attach(MIMEText(text_body, "plain"))
-        msg.attach(MIMEText(html_body, "html"))
-        
-        # Send email with timeout
-        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT, timeout=10) as server:
-            server.starttls(timeout=10)
-            server.login(MAIL_USERNAME, MAIL_PASSWORD)
-            server.send_message(msg)
-        
-        print(f"✓ Password reset email sent to {email}")
-    
+
+        response = req.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": "SkillChain <onboarding@resend.dev>",
+                "to": email,
+                "subject": "SkillChain - Password Reset Code",
+                "html": html_body
+            },
+            timeout=15
+        )
+
+        if response.status_code == 200:
+            print(f"✓ Password reset email sent to {email}")
+        else:
+            print(f"✗ Resend API error: {response.status_code} | {response.text}")
+
     except Exception as e:
         print(f"✗ Failed to send email to {email}: {type(e).__name__}: {e}")
 
 
 def send_reset_email(email, token, user_name="User"):
-    """Send password reset email - runs synchronously with timeout"""
+    """Send password reset email in background thread"""
     thread = Thread(target=_send_email_blocking, args=(email, token, user_name), daemon=False)
     thread.start()
-    thread.join(timeout=15)  # wait up to 15 seconds
+    thread.join(timeout=15)
     print(f"[EMAIL] Thread completed for {email}")
     return True
