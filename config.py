@@ -27,7 +27,27 @@ DB_CONFIG = {
     "port":     int(os.getenv("DB_PORT", 3306)),
 }
 
-# Validate database configuration on startup
+# Session configuration
+SESSION_COOKIE_SAMESITE = "None"
+SESSION_COOKIE_SECURE = False if ENV == "development" else True
+SESSION_COOKIE_HTTPONLY = True
+ALLOWED_ORIGINS = ["https://skillchain-frontend-omega.vercel.app/", "http://localhost:5501"]
+
+# Squad API headers
+SQUAD_HEADERS = {
+    "Authorization": f"Bearer {SQUAD_KEY}" if SQUAD_KEY else "",
+    "Content-Type": "application/json"
+}
+
+# Email configuration (MUST be before validation prints)
+MAIL_SERVER = "smtp.gmail.com"
+MAIL_PORT = 587
+MAIL_USE_TLS = True
+MAIL_USERNAME = os.getenv("MAIL_USERNAME", "hamzlabs01@gmail.com")
+MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "Hamz/slab@01")
+MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", "hello@hamzlabs.com")
+
+# NOW print validation
 print(f"\n{'='*60}")
 print(f"[CONFIG] Database Configuration:")
 print(f"  Host: {DB_CONFIG.get('host')}")
@@ -49,26 +69,6 @@ if not DB_CONFIG.get('user'):
     print("[WARNING] DB_USER environment variable not set!")
 if not DB_CONFIG.get('password'):
     print("[WARNING] DB_PASSWORD environment variable not set!")
-
-# Session configuration
-SESSION_COOKIE_SAMESITE = "None"
-SESSION_COOKIE_SECURE = False if ENV == "development" else True
-SESSION_COOKIE_HTTPONLY = True
-ALLOWED_ORIGINS = ["https://skillchain-frontend-omega.vercel.app/", "http://localhost:5501"]
-
-# Squad API headers
-SQUAD_HEADERS = {
-    "Authorization": f"Bearer {SQUAD_KEY}" if SQUAD_KEY else "",
-    "Content-Type": "application/json"
-}
-
-# Email configuration
-MAIL_SERVER = "smtp.gmail.com"
-MAIL_PORT = 587
-MAIL_USE_TLS = True
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", "hamzlabs01@gmail.com")
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "Hamz/slab@01")
-MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", "hello@hamzlabs.com")
 
 
 class Config:
