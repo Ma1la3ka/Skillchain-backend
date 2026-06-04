@@ -31,7 +31,7 @@ DB_CONFIG = {
 SESSION_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = False if ENV == "development" else True
 SESSION_COOKIE_HTTPONLY = True
-ALLOWED_ORIGINS = ["https://skillchain-frontend-omega.vercel.app/", "http://localhost:5501"]
+ALLOWED_ORIGINS = ["https://skillchain-frontend-omega.vercel.app", "http://localhost:5501"]
 
 # Squad API headers
 SQUAD_HEADERS = {
