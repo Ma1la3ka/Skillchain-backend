@@ -6,7 +6,7 @@ from config import (
     SESSION_COOKIE_SECURE, SESSION_COOKIE_HTTPONLY,
     ALLOWED_ORIGINS
 )
-from database import init_db
+
 from routes import blueprints
 
 
@@ -14,11 +14,6 @@ def create_app():
     """Create and configure Flask application"""
     app = Flask(__name__)
 
-    CORS(app, supports_credentials=True, origins=[
-        "https://skillchain-frontend-omega.vercel.app",  # Your live frontend!
-        "http://localhost:5501",                         # So your local testing still works
-        "http://127.0.0.1:5501"                          # So your local testing still works
-    ])
 
     # Configuration
     app.secret_key = SECRET_KEY
@@ -42,9 +37,7 @@ def create_app():
     for bp in blueprints:
         app.register_blueprint(bp)
 
-    # Initialize database
-    with app.app_context():
-        init_db()
+       
 
     return app
 
