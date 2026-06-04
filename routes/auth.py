@@ -4,7 +4,7 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import random
 from database_helper import get_db
-from utils import squad_create_virtual_account
+from utils import squad_create_virtual_account, send_reset_email
 
 auth_bp = Blueprint('auth', __name__)
 
@@ -141,7 +141,7 @@ def forgot_password():
 
     conn = get_db()
     cur = conn.cursor(dictionary=True)
-    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+    cur.execute("SELECT id, name FROM users WHERE email = %s", (email,))
     user = cur.fetchone()
 
     if not user:
@@ -159,11 +159,19 @@ def forgot_password():
             (user["id"], token, expiry)
         )
         conn.commit()
+        
         print(f"\n{'='*40}")
         print(f"PASSWORD RESET TOKEN for {email}: {token}")
         print(f"Expires: {expiry}")
         print(f"{'='*40}\n")
-        return jsonify({"success": True, "message": "Reset code generated! Check your email."})
+        
+        # Send password reset email (non-blocking - won't crash if email fails)
+        try:
+            send_reset_email(email, token, user.get("name", "User"))
+        except Exception as email_err:
+            print(f"Warning: Email send failed but token was generated: {email_err}")
+        
+        return jsonify({"success": True, "message": "Reset code has been sent to your email."})
     except Exception as e:
         print(f"Forgot password error: {e}")
         return jsonify({"success": False, "message": "Server error."}), 500

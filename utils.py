@@ -3,7 +3,10 @@ import math
 import uuid
 import json
 import requests as req
-from config import SQUAD_BASE_URL, SQUAD_HEADERS
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from config import SQUAD_BASE_URL, SQUAD_HEADERS, MAIL_SERVER, MAIL_PORT, MAIL_USERNAME, MAIL_PASSWORD, MAIL_DEFAULT_SENDER
 
 
 def haversine_distance(lat1, lng1, lat2, lng2):
@@ -146,3 +149,71 @@ def squad_payout(job, worker_id, cur):
     except Exception as e:
         print(f"[payout] Exception: {e}")
         return reference
+
+
+def send_reset_email(email, token, user_name="User"):
+    """Send password reset email with token"""
+    try:
+        # Create email content
+        subject = "SkillChain - Password Reset Code"
+        
+        html_body = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
+                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h2 style="color: #333; margin-bottom: 20px;">Password Reset Request</h2>
+                    
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                        Hi {user_name},
+                    </p>
+                    
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                        We received a request to reset your SkillChain password. Use the code below to proceed:
+                    </p>
+                    
+                    <div style="background-color: #e85c00; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 30px 0; font-size: 28px; font-weight: bold; letter-spacing: 3px;">
+                        {token}
+                    </div>
+                    
+                    <p style="color: #555; font-size: 14px; line-height: 1.6;">
+                        <strong>This code expires in 10 minutes.</strong>
+                    </p>
+                    
+                    <p style="color: #555; font-size: 14px; line-height: 1.6;">
+                        If you didn't request this, please ignore this email or contact our support team.
+                    </p>
+                    
+                    <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+                    
+                    <p style="color: #999; font-size: 12px; text-align: center;">
+                        SkillChain Team<br>
+                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #e85c00; text-decoration: none;">Visit SkillChain</a>
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+        
+        # Create message
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = MAIL_DEFAULT_SENDER
+        msg["To"] = email
+        
+        # Attach plain text and HTML
+        text_body = f"Your SkillChain password reset code is: {token}\n\nThis code expires in 10 minutes."
+        msg.attach(MIMEText(text_body, "plain"))
+        msg.attach(MIMEText(html_body, "html"))
+        
+        # Send email
+        with smtplib.SMTP(MAIL_SERVER, MAIL_PORT) as server:
+            server.starttls()
+            server.login(MAIL_USERNAME, MAIL_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"✓ Password reset email sent to {email}")
+        return True
+    
+    except Exception as e:
+        print(f"✗ Failed to send email to {email}: {e}")
+        return False
