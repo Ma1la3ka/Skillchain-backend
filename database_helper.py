@@ -2,14 +2,19 @@
 import mysql.connector
 from config import DB_CONFIG
 
-
 def get_db():
     """Get database connection"""
     try:
         # Log connection attempt (for debugging on Render)
         print(f"\n[DB] Attempting connection to: {DB_CONFIG.get('host')}:{DB_CONFIG.get('port')} | DB: {DB_CONFIG.get('database')}")
         
-        conn = mysql.connector.connect(**DB_CONFIG)
+        # --- TIDB SSL CONNECTION FIX ---
+        conn = mysql.connector.connect(
+            **DB_CONFIG,
+            ssl_disabled=False,
+            ssl_verify_identity=True
+        )
+        
         print(f"[DB] ✓ Connected successfully")
         return conn
     except mysql.connector.Error as err:
