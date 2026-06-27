@@ -87,11 +87,11 @@ def api_post_job():
         escrow_ref = f"escrow_{uuid.uuid4().hex[:12]}"
         cur.execute(
             """INSERT INTO jobs
-               (client_id, title, description, site_address,
-                site_lat, site_lng, amount, trade, escrow_reference)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (client_id, title, description, site_address,
+                site_lat, site_lng, amount, trade, escrow_reference, status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open')""",
             (user_id, title, description, site_address,
-             site_lat, site_lng, amount, trade, escrow_ref)
+            site_lat, site_lng, amount, trade, escrow_ref)
         )
         job_id = cur.lastrowid
         conn.commit()
