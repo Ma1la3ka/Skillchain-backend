@@ -141,6 +141,61 @@ def squad_payout(job, worker_id, cur):
         return reference
 
 
+def release_job_payment(job, cur):
+    """
+    Pay out escrowed funds to the worker and finalize the job as 'paid'.
+    Shared by: client approval endpoint AND the 24h auto-release scheduler.
+
+    Job flow: 'assigned' -> (GPS check passes) -> 'verified' (awaiting client
+    review) -> 'paid' (client approved, or 24h auto-release fired).
+
+    SAFE AGAINST DOUBLE-PAYOUT: claims the job atomically first by flipping
+    the existing `paid_at` column from NULL to NOW() in one conditional
+    UPDATE. Because of standard row-level locking, if two callers race (two
+    scheduler ticks, or a scheduler tick landing the same instant as a
+    client's manual approve click), only one UPDATE can possibly match and
+    change a row — the loser gets rowcount == 0 and backs off cleanly
+    instead of paying twice. We deliberately do this BEFORE the slow
+    external squad_payout() network call, so we're not holding a DB lock
+    open for the duration of that call.
+
+    Returns the transfer_reference on success, or None if the job had
+    already been claimed/resolved by someone else (caller should treat
+    that as "nothing to do", not an error).
+    """
+    job_id = job["id"]
+
+    cur.execute(
+        """UPDATE jobs SET paid_at = NOW()
+           WHERE id = %s AND status = 'verified' AND paid_at IS NULL""",
+        (job_id,)
+    )
+    claimed = cur.rowcount == 1
+    if not claimed:
+        return None  # someone else already claimed/resolved this job
+
+    worker_id = job["worker_id"]
+    transfer_reference = squad_payout(job, worker_id, cur)
+
+    cur.execute(
+        """UPDATE jobs SET
+           status             = 'paid',
+           transfer_reference = %s
+           WHERE id = %s""",
+        (transfer_reference, job_id)
+    )
+
+    cur.execute(
+        """UPDATE users
+           SET jobs_completed = jobs_completed + 1,
+               trust_score    = LEAST(5.0, trust_score + 0.1)
+           WHERE id = %s""",
+        (worker_id,)
+    )
+
+    return transfer_reference
+
+
 def _send_email_blocking(email, token, user_name="User"):
     """Send password reset email via Resend API"""
     try:

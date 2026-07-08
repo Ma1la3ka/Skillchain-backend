@@ -80,6 +80,7 @@ def api_worker_jobs():
         job["created_at"] = str(job["created_at"])
         job["verified_at"] = str(job["verified_at"]) if job["verified_at"] else None
         job["paid_at"] = str(job["paid_at"]) if job["paid_at"] else None
+        job["review_deadline"] = str(job["review_deadline"]) if job.get("review_deadline") else None
 
     return jsonify({"jobs": jobs})
 

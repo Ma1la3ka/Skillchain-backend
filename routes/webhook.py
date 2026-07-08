@@ -6,6 +6,7 @@ import os
 from flask import Blueprint, request, jsonify
 from database_helper import get_db
 from config import SQUAD_KEY
+from utils import release_job_payment
 
 webhook_bp = Blueprint('webhook', __name__, url_prefix='/api')
 
@@ -133,6 +134,37 @@ def api_simulate_payment():
         )
         conn.commit()
         return jsonify({"success": True, "message": f"Job {job_id} escrow simulated as paid ₦{job['amount']}"})
+    finally:
+        cur.close()
+        conn.close()
+
+
+@webhook_bp.route("/dev/force-release/<int:job_id>", methods=["POST"])
+def api_dev_force_release(job_id):
+    """DEV ONLY: Force the 24h auto-release logic to run for one job right now,
+    instead of waiting for the scheduler / real 24h deadline. Handy for testing
+    the client-review-timeout flow without sitting around for a day."""
+    if os.environ.get("FLASK_ENV") == "production":
+        return jsonify({"error": "Not available in production"}), 403
+
+    conn = get_db()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+        job = cur.fetchone()
+        if not job:
+            return jsonify({"error": "Job not found"}), 404
+        if job["status"] != "verified":
+            return jsonify({"error": f"Job status is '{job['status']}', not 'verified'."}), 400
+
+        ref = release_job_payment(job, cur)
+        conn.commit()
+        if ref is None:
+            return jsonify({"success": False, "message": "Job was already resolved by another process."}), 409
+        return jsonify({"success": True, "message": f"Job {job_id} force-released.", "transfer_reference": ref})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()
         conn.close()

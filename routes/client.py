@@ -1,7 +1,7 @@
 """Client-related routes"""
 from flask import Blueprint, request, jsonify
 from database_helper import get_db
-from utils import squad_create_collection_account
+from utils import squad_create_collection_account, release_job_payment
 import uuid
 
 client_bp = Blueprint('client', __name__, url_prefix='/api/client')
@@ -39,6 +39,7 @@ def api_client_jobs():
         job["created_at"] = str(job["created_at"])
         job["verified_at"] = str(job["verified_at"]) if job["verified_at"] else None
         job["paid_at"] = str(job["paid_at"]) if job["paid_at"] else None
+        job["review_deadline"] = str(job["review_deadline"]) if job.get("review_deadline") else None
         job["bargain_price"] = float(job["bargain_price"]) if job["bargain_price"] else None
         job["escrow_paid"] = bool(job["escrow_paid"])
     return jsonify({"jobs": jobs})
@@ -305,6 +306,133 @@ def api_pay_escrow():
         return jsonify({"success": True, "message": "Escrow funded. Worker can now begin."})
     except Exception as e:
         conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@client_bp.route("/pending-review-jobs")
+def api_client_pending_review_jobs():
+    """Get jobs where the artisan's GPS check passed and proof was submitted —
+    awaiting the client's approve/dispute decision before payment releases.
+    (Job status 'verified' — NOT 'pending_review', which is a different,
+    pre-existing status meaning 'worker application awaiting assignment'.)"""
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cur = conn.cursor(dictionary=True)
+    cur.execute(
+        """SELECT j.id, j.title, j.amount, j.status, j.verified_at, j.review_deadline,
+                  j.distance_meters, j.video_proof_path,
+                  w.id AS worker_id, w.name AS worker_name, w.trust_score AS worker_trust
+           FROM jobs j
+           JOIN users w ON w.id = j.worker_id
+           WHERE j.client_id = %s AND j.status = 'verified' AND j.paid_at IS NULL
+           ORDER BY j.verified_at DESC""",
+        (user_id,)
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    for r in rows:
+        r["amount"] = float(r["amount"] or 0)
+        r["worker_trust"] = float(r["worker_trust"] or 0)
+        r["distance_meters"] = float(r["distance_meters"]) if r["distance_meters"] else None
+        r["verified_at"] = str(r["verified_at"]) if r["verified_at"] else None
+        r["review_deadline"] = str(r["review_deadline"]) if r["review_deadline"] else None
+
+    return jsonify({"jobs": rows})
+
+
+@client_bp.route("/review-job", methods=["POST"])
+def api_client_review_job():
+    """Client approves (releases payment) or disputes the artisan's submitted work"""
+    data = request.get_json(silent=True) or {}
+    job_id = data.get("job_id")
+    user_id = str(data.get("user_id", "")).strip()
+    action = data.get("action")
+    reason = data.get("reason", "").strip()
+
+    if not all([job_id, user_id, action]) or action not in ("approve", "dispute"):
+        return jsonify({"success": False, "message": "job_id, user_id and action ('approve'/'dispute') required."}), 400
+
+    conn = get_db()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            "SELECT * FROM jobs WHERE id = %s AND client_id = %s",
+            (job_id, user_id)
+        )
+        job = cur.fetchone()
+
+        if not job:
+            return jsonify({"success": False, "message": "Job not found."}), 404
+
+        if job["status"] != "verified":
+            return jsonify({
+                "success": False,
+                "message": f"Job is not awaiting review (status: {job['status']})."
+            }), 400
+
+        if action == "approve":
+            transfer_reference = release_job_payment(job, cur)
+            conn.commit()
+
+            if transfer_reference is None:
+                # Someone else (auto-release scheduler, or a second click)
+                # already resolved this job in the moment between our SELECT
+                # and our UPDATE. Not an error — just tell the client where
+                # things actually landed.
+                cur.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
+                current = cur.fetchone()
+                return jsonify({
+                    "success": True,
+                    "action": "approve",
+                    "already_resolved": True,
+                    "message": f"This job was already resolved (status: {current['status']}).",
+                })
+
+            return jsonify({
+                "success": True,
+                "action": "approve",
+                "message": "Payment released to the artisan!",
+                "transfer_reference": transfer_reference
+            })
+
+        # action == "dispute"
+        # Atomic claim here too: only flips to disputed if it's STILL
+        # 'verified' with paid_at still NULL right now — same lock the
+        # auto-release scheduler and approve path use, so this can't race
+        # past a payment that already went out a split second earlier.
+        cur.execute(
+            """UPDATE jobs SET status = 'disputed', dispute_reason = %s
+               WHERE id = %s AND status = 'verified' AND paid_at IS NULL""",
+            (reason, job_id)
+        )
+        if cur.rowcount != 1:
+            conn.commit()
+            cur.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
+            current = cur.fetchone()
+            return jsonify({
+                "success": False,
+                "already_resolved": True,
+                "message": f"This job was already resolved before your dispute could be recorded (status: {current['status']})."
+            }), 409
+
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "action": "dispute",
+            "message": "Job flagged as disputed. Our team will review it."
+        })
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[review-job error] {e}")
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()
@@ -590,6 +718,7 @@ def api_client_jobs_social():
         job["created_at"] = str(job["created_at"])
         job["verified_at"] = str(job["verified_at"]) if job["verified_at"] else None
         job["paid_at"] = str(job["paid_at"]) if job["paid_at"] else None
+        job["review_deadline"] = str(job["review_deadline"]) if job.get("review_deadline") else None
         job["escrow_paid"] = bool(job["escrow_paid"])
 
     return jsonify({"jobs": jobs})

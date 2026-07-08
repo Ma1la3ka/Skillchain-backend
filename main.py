@@ -8,6 +8,7 @@ from config import (
 )
 
 from routes import blueprints
+from scheduler import start_scheduler
 
 
 def create_app():
@@ -37,7 +38,10 @@ def create_app():
     for bp in blueprints:
         app.register_blueprint(bp)
 
-       
+    # Start background job that auto-releases escrow after 24h of no client
+    # response on a pending_review job. See scheduler.py for details/caveats
+    # around multi-process deployments.
+    start_scheduler()
 
     return app
 

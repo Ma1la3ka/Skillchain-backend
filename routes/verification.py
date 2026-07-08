@@ -1,7 +1,7 @@
 """Job verification and payment routes"""
 from flask import Blueprint, request, jsonify
 from database_helper import get_db
-from utils import haversine_distance, squad_payout
+from utils import haversine_distance
 import os
 import uuid
 
@@ -49,8 +49,8 @@ def api_verify_job():
             worker_lat, worker_lng
         )
         radius = 100  # metres
-        verified = distance <= radius
-        result = "pass" if verified else "fail"
+        in_range = distance <= radius
+        result = "pass" if in_range else "fail"
 
         # Save video proof (optional)
         video_path = None
@@ -60,20 +60,40 @@ def api_verify_job():
             video_path = os.path.join("static/videos", filename)
             video.save(video_path)
 
-        # Mark job status
-        cur.execute(
-            """UPDATE jobs SET
-               worker_lat       = %s,
-               worker_lng       = %s,
-               distance_meters  = %s,
-               status           = %s,
-               verified_at      = NOW(),
-               video_proof_path = %s
-               WHERE id = %s""",
-            (worker_lat, worker_lng, distance,
-             "verified" if verified else "pending_verification",
-             video_path, job_id)
-        )
+        # Mark job status.
+        # IMPORTANT: 'pending_review' is already used elsewhere in this app
+        # to mean "worker application awaiting client assignment approval" —
+        # reusing it here would collide with that. We use the existing
+        # 'verified' status instead: GPS check passed, now awaiting the
+        # client's approve/dispute decision before payment is released.
+        new_status = "verified" if in_range else "pending_verification"
+
+        if in_range:
+            # review_deadline is computed in SQL (NOW() + 24h), not passed as a param
+            cur.execute(
+                """UPDATE jobs SET
+                   worker_lat        = %s,
+                   worker_lng        = %s,
+                   distance_meters   = %s,
+                   status            = %s,
+                   verified_at       = NOW(),
+                   review_deadline   = NOW() + INTERVAL 24 HOUR,
+                   video_proof_path  = %s
+                   WHERE id = %s""",
+                (worker_lat, worker_lng, distance, new_status, video_path, job_id)
+            )
+        else:
+            cur.execute(
+                """UPDATE jobs SET
+                   worker_lat        = %s,
+                   worker_lng        = %s,
+                   distance_meters   = %s,
+                   status            = %s,
+                   verified_at       = NOW(),
+                   video_proof_path  = %s
+                   WHERE id = %s""",
+                (worker_lat, worker_lng, distance, new_status, video_path, job_id)
+            )
 
         # Log verification attempt
         cur.execute(
@@ -81,37 +101,23 @@ def api_verify_job():
             (job_id, worker_id, passed, result, distance_meters,
             worker_lat, worker_lng, site_lat, site_lng)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
-            (job_id, user_id, 1 if verified else 0, result, distance,
+            (job_id, user_id, 1 if in_range else 0, result, distance,
             worker_lat, worker_lng,
             float(job["site_lat"]), float(job["site_lng"]))
         )
-        
-        transfer_reference = None
-
-        if verified:
-            # Squad payout
-            transfer_reference = squad_payout(job, user_id, cur)
-            if transfer_reference:
-                cur.execute(
-                    "UPDATE jobs SET status = 'paid', paid_at = NOW(), transfer_reference = %s WHERE id = %s",
-                    (transfer_reference, job_id)
-                )
-                # Increment worker trust score and jobs_completed
-                cur.execute(
-                    """UPDATE users
-                       SET jobs_completed = jobs_completed + 1,
-                           trust_score    = LEAST(5.0, trust_score + 0.1)
-                       WHERE id = %s""",
-                    (user_id,)
-                )
 
         conn.commit()
         return jsonify({
-            "verified": verified,
+            "in_range": in_range,
             "distance_meters": distance,
             "radius_meters": radius,
-            "message": "Job verified and payment released!" if verified else "You are too far from the job site.",
-            "transfer_reference": transfer_reference
+            "status": new_status,
+            "message": (
+                "Submitted! Waiting for client to review and release payment "
+                "(auto-released after 24h if no response)."
+                if in_range else
+                "You are too far from the job site."
+            )
         })
 
     except Exception as e:
