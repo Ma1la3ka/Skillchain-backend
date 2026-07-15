@@ -2,7 +2,7 @@
 # SkillChain Backend
 
 Skillchain helps artisans in Africa gain visibility for their skills and connects them 
-with clients looking for trusted workers. This is the backend API powering that platform.
+with clients looking for trusted workers. This is the backend API powering that platform.(MVP)
 
 ## Features
 - [e.g. Artisan profiles & skill verification]
