@@ -48,7 +48,7 @@ def api_verify_job():
             float(job["site_lat"]), float(job["site_lng"]),
             worker_lat, worker_lng
         )
-        radius = 100  # metres
+        radius = 150  # metres
         in_range = distance <= radius
         result = "pass" if in_range else "fail"
 
