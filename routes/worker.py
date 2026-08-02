@@ -3,6 +3,7 @@ from flask import Blueprint, request, jsonify
 from database_helper import get_db
 from utils import haversine_distance
 import uuid
+import os
 
 worker_bp = Blueprint('worker', __name__, url_prefix='/api/worker')
 
@@ -18,13 +19,15 @@ def api_worker_profile():
     cur = conn.cursor(dictionary=True)
 
     cur.execute(
-        """SELECT id, name, email, role, phone, trade,
-                  trust_score, jobs_completed,
-                  squad_account_number, squad_bank_name, squad_customer_id,
-                  total_withdrawn
-           FROM users WHERE id = %s AND role = 'worker'""",
-        (user_id,)
-    )
+    """SELECT id, name, email, role, phone, trade,
+              trust_score, jobs_completed,
+              squad_account_number, squad_bank_name, squad_customer_id,
+              total_withdrawn, bio, top_skills, profile_photo_path,
+              escrow_balance, bank_account_no, bank_code, bank_name,
+              bank_account_name
+       FROM users WHERE id = %s AND role = 'worker'""",
+    (user_id,)
+)
     user = cur.fetchone()
     if not user:
         cur.close()
@@ -48,6 +51,14 @@ def api_worker_profile():
     conn.close()
 
     user["trust_score"] = float(user["trust_score"] or 0)
+    user["escrow_balance"] = float(user["escrow_balance"] or 0)
+
+    # Convert top_skills from comma string to list
+    if user.get("top_skills"):
+        user["top_skills"] = [s.strip() for s in user["top_skills"].split(",") if s.strip()]
+    else:
+        user["top_skills"] = []
+
     user["verification_logs"] = logs
     return jsonify(user)
 
@@ -269,6 +280,64 @@ def api_open_jobs_social():
         job["my_bargain_price"] = float(job["my_bargain_price"]) if job["my_bargain_price"] else None
 
     return jsonify({"jobs": jobs})
+
+
+@worker_bp.route("/update-profile", methods=["POST"])
+def api_update_profile():
+    data       = request.get_json(silent=True) or {}
+    user_id    = str(data.get("user_id", "")).strip()
+    phone      = data.get("phone", "").strip()
+    bio        = data.get("bio", "").strip()
+    top_skills = data.get("top_skills", [])
+    if not user_id:
+        return jsonify({"success": False, "message": "user_id required"}), 400
+
+    skills_str = ",".join(top_skills) if isinstance(top_skills, list) else str(top_skills)
+
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE users SET phone=%s, bio=%s, top_skills=%s WHERE id=%s",
+            (phone or None, bio or None, skills_str or None, user_id)
+        )
+        conn.commit()
+        return jsonify({"success": True})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@worker_bp.route("/upload-avatar", methods=["POST"])
+def api_upload_avatar():
+    user_id = request.form.get("user_id", "").strip()
+    file    = request.files.get("photo")
+    if not user_id or not file:
+        return jsonify({"success": False, "message": "Missing user_id or photo"}), 400
+
+    ext   = os.path.splitext(file.filename)[1].lower() or ".jpg"
+    fname = f"avatar_{user_id}{ext}"
+    path  = os.path.join("static", "avatars", fname)
+    os.makedirs(os.path.join("static", "avatars"), exist_ok=True)
+    file.save(path)
+
+    conn = get_db()
+    cur  = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE users SET profile_photo_path = %s WHERE id = %s",
+            (path, user_id)
+        )
+        conn.commit()
+        return jsonify({"success": True, "path": path})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
 @worker_bp.route("/withdraw", methods=["POST"])

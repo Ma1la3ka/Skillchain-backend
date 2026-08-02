@@ -1,309 +1,291 @@
-"""Client-related routes"""
+"""Client-side routes for SkillChain"""
 from flask import Blueprint, request, jsonify
 from database_helper import get_db
-from utils import squad_create_collection_account, release_job_payment
-import uuid
+from datetime import datetime, timedelta
 
 client_bp = Blueprint('client', __name__, url_prefix='/api/client')
 
+# ── Fee constants ──────────────────────────────────────────────────────────────
+PLATFORM_FEE_RATE  = 0.05    # 5% total
+CLIENT_FEE_RATE    = 0.025   # 2.5% from client
+ARTISAN_FEE_RATE   = 0.025   # 2.5% from artisan
+MAX_PLATFORM_FEE   = 2500.00 # ₦2,500 total cap
+MAX_CLIENT_FEE     = 1250.00 # ₦1,250 per side cap
+MAX_ARTISAN_FEE    = 1250.00 # ₦1,250 per side cap
 
-@client_bp.route("/jobs")
-def api_client_jobs():
-    """Get all jobs posted by this client"""
-    user_id = request.args.get("user_id")
+
+def calculate_fees(amount):
+    """
+    Calculate platform fees with cap.
+    
+    Below ₦50,000: 2.5% each side
+    Above ₦50,000: capped at ₦1,250 each side (₦2,500 total)
+    
+    Returns dict with all fee breakdown values.
+    """
+    amount = float(amount)
+
+    client_fee   = min(round(amount * CLIENT_FEE_RATE,  2), MAX_CLIENT_FEE)
+    artisan_fee  = min(round(amount * ARTISAN_FEE_RATE, 2), MAX_ARTISAN_FEE)
+    platform_fee = client_fee + artisan_fee
+
+    client_pays  = round(amount + client_fee,  2)
+    artisan_gets = round(amount - artisan_fee, 2)
+
+    return {
+        "amount":       amount,
+        "client_fee":   client_fee,
+        "artisan_fee":  artisan_fee,
+        "platform_fee": platform_fee,
+        "client_pays":  client_pays,
+        "artisan_gets": artisan_gets,
+    }
+
+
+# ── Profile ───────────────────────────────────────────────────────────────────
+@client_bp.route("/profile")
+def api_client_profile():
+    """Get client's full profile with job stats"""
+    user_id = request.args.get("user_id", "").strip()
     if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
+        return jsonify({"error": "user_id required"}), 400
 
     conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT j.*,
-                  w.name AS worker_name, w.trust_score AS worker_trust,
-                  j.bargain_price, j.bargain_status, j.bargain_worker_id,
-                  j.collection_account_number, j.collection_bank_name,
-                  j.escrow_paid, j.escrow_amount_received
-           FROM jobs j
-           LEFT JOIN users w ON j.worker_id = w.id
-           WHERE j.client_id = %s
-           ORDER BY j.created_at DESC""",
-        (user_id,)
-    )
-    jobs = cur.fetchall()
-    cur.close()
-    conn.close()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT id, name, email, role, phone, bio,
+                      top_skills, profile_photo_path,
+                      bank_account_no, bank_code,
+                      bank_name, bank_account_name,
+                      has_client_profile, active_role
+               FROM users WHERE id = %s""",
+            (user_id,)
+        )
+        user = cur.fetchone()
+        if not user:
+            return jsonify({"error": "User not found"}), 404
 
-    for job in jobs:
-        job["amount"] = float(job["amount"] or 0)
-        job["distance_meters"] = float(job["distance_meters"]) if job["distance_meters"] else None
-        job["worker_trust"] = float(job["worker_trust"]) if job["worker_trust"] else None
-        job["created_at"] = str(job["created_at"])
-        job["verified_at"] = str(job["verified_at"]) if job["verified_at"] else None
-        job["paid_at"] = str(job["paid_at"]) if job["paid_at"] else None
-        job["review_deadline"] = str(job["review_deadline"]) if job.get("review_deadline") else None
-        job["bargain_price"] = float(job["bargain_price"]) if job["bargain_price"] else None
-        job["escrow_paid"] = bool(job["escrow_paid"])
-    return jsonify({"jobs": jobs})
+        # Convert top_skills comma string → list
+        if user.get("top_skills"):
+            user["top_skills"] = [
+                s.strip() for s in user["top_skills"].split(",") if s.strip()
+            ]
+        else:
+            user["top_skills"] = []
+
+        # Job stats
+        cur.execute(
+            """SELECT
+                 COUNT(*)                                                        AS total_jobs,
+                 SUM(CASE WHEN status = 'paid'   THEN 1     ELSE 0   END)       AS completed_jobs,
+                 SUM(CASE WHEN status = 'paid'   THEN amount ELSE 0  END)       AS total_spent,
+                 SUM(CASE WHEN status IN ('open','assigned','pending_verification')
+                          THEN amount ELSE 0 END)                                AS in_escrow
+               FROM jobs WHERE client_id = %s""",
+            (user_id,)
+        )
+        stats = cur.fetchone()
+
+        user["total_jobs"]     = int(stats["total_jobs"]     or 0)
+        user["completed_jobs"] = int(stats["completed_jobs"] or 0)
+        user["total_spent"]    = float(stats["total_spent"]  or 0)
+        user["in_escrow"]      = float(stats["in_escrow"]    or 0)
+
+        return jsonify(user)
+
+    except Exception as e:
+        print(f"[client-profile error] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
+# ── Post Job ──────────────────────────────────────────────────────────────────
 @client_bp.route("/post-job", methods=["POST"])
 def api_post_job():
-    """Client posts a new job"""
-    user_id = request.form.get("user_id", "").strip()
-    role = request.form.get("role", "").strip()
+    """Post a new job with fee calculation"""
+    data        = request.get_json(silent=True) or {}
+    user_id     = str(data.get("user_id", "")).strip()
+    title       = data.get("title",       "").strip()
+    description = data.get("description", "").strip()
+    trade       = data.get("trade",       "").strip()
+    site_address= data.get("site_address","").strip()
+    lat         = data.get("site_lat")
+    lng         = data.get("site_lng")
+    raw_amount  = data.get("amount", 0)
 
-    if not user_id or role != "client":
-        return jsonify({"error": "Unauthorized"}), 401
+    if not all([user_id, title, trade, site_address, raw_amount]):
+        return jsonify({"success": False,
+                        "message": "user_id, title, trade, site_address and amount are required."}), 400
 
-    title = request.form.get("title", "").strip()
-    description = request.form.get("description", "").strip()
-    site_address = request.form.get("site_address", "").strip()
-    trade = request.form.get("trade", "").strip() or None
-
-    errors = {}
-    if not title:
-        errors["title"] = "Job title is required."
-    if not site_address:
-        errors["address"] = "Site address is required."
-
-    amount = site_lat = site_lng = None
     try:
-        amount = float(request.form.get("amount", ""))
-        site_lat = float(request.form.get("site_lat", ""))
-        site_lng = float(request.form.get("site_lng", ""))
-        if amount < 100:
-            errors["amount"] = "Amount must be at least ₦100."
+        fees = calculate_fees(raw_amount)
     except (ValueError, TypeError):
-        errors["amount"] = "Enter a valid amount."
+        return jsonify({"success": False, "message": "Invalid amount."}), 400
 
-    if errors:
-        return jsonify({"success": False, "errors": errors}), 400
+    if fees["amount"] < 500:
+        return jsonify({"success": False, "message": "Minimum job amount is ₦500."}), 400
 
     conn = get_db()
-    cur = conn.cursor(dictionary=True)
+    cur  = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT name FROM users WHERE id = %s", (user_id,))
-        client_row = cur.fetchone()
-        client_name = client_row["name"] if client_row else "Client"
-
-        escrow_ref = f"escrow_{uuid.uuid4().hex[:12]}"
         cur.execute(
             """INSERT INTO jobs
-            (client_id, title, description, site_address,
-                site_lat, site_lng, amount, trade, escrow_reference, status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,'open')""",
-            (user_id, title, description, site_address,
-            site_lat, site_lng, amount, trade, escrow_ref)
+               (client_id, title, description, trade,
+                site_address, site_lat, site_lng,
+                amount, platform_fee, client_pays, artisan_gets,
+                status, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'open', NOW())""",
+            (user_id, title, description, trade,
+             site_address, lat, lng,
+             fees["amount"], fees["platform_fee"],
+             fees["client_pays"], fees["artisan_gets"])
         )
-        job_id = cur.lastrowid
         conn.commit()
-
-        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
-        client_row2 = cur.fetchone()
-        client_email = client_row2["email"] if client_row2 else "client@skillchain.com"
-        squad = squad_create_collection_account(job_id, amount, client_email)
-
-        if squad.get("account_number"):
-            cur.execute(
-                """UPDATE jobs SET
-                   collection_account_number = %s,
-                   collection_bank_name      = %s,
-                   collection_bank_code      = %s,
-                   escrow_reference          = %s
-                   WHERE id = %s""",
-                (squad["account_number"], squad["bank_name"],
-                 squad["bank_code"], squad.get("reference", escrow_ref),
-                 job_id)
-            )
-            conn.commit()
-
+        job_id = cur.lastrowid
         return jsonify({
-            "success": True,
-            "job_id": job_id,
-            "payment": {
-                "account_number": squad.get("account_number", ""),
-                "bank_name": squad.get("bank_name", ""),
-                "amount": amount,
-                "instructions": f"Transfer exactly ₦{amount:,.0f} to this account to fund escrow"
+            "success":     True,
+            "job_id":      job_id,
+            "fee_breakdown": {
+                "job_amount":   fees["amount"],
+                "your_fee":     fees["client_fee"],
+                "you_pay":      fees["client_pays"],
+                "artisan_gets": fees["artisan_gets"],
+                "platform_fee": fees["platform_fee"],
+                "cap_applied":  fees["client_fee"] >= MAX_CLIENT_FEE,
             }
         })
-
     except Exception as e:
         conn.rollback()
         print(f"[post-job error] {e}")
-        return jsonify({"success": False, "errors": {"general": str(e)}}), 500
-    finally:
-        cur.close()
-        conn.close()
-
-
-@client_bp.route("/delete-job", methods=["DELETE"])
-def api_delete_job():
-    """Client deletes an open job"""
-    data = request.get_json(silent=True) or {}
-    job_id = data.get("job_id")
-    user_id = data.get("user_id")
-
-    if not job_id or not user_id:
-        return jsonify({"success": False, "message": "Missing data."}), 400
-
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-
-    try:
-        cur.execute(
-            "SELECT id, status FROM jobs WHERE id = %s AND client_id = %s",
-            (job_id, user_id)
-        )
-        job = cur.fetchone()
-
-        if not job:
-            return jsonify({"success": False, "message": "Job not found."}), 404
-
-        if job["status"] not in ("open",):
-            return jsonify({
-                "success": False,
-                "message": "You can only delete jobs that haven't been accepted yet."
-            }), 400
-
-        cur.execute("DELETE FROM job_applications WHERE job_id = %s", (job_id,))
-        cur.execute("DELETE FROM jobs WHERE id = %s AND client_id = %s", (job_id, user_id))
-        conn.commit()
-        return jsonify({"success": True})
-
-    except Exception as e:
-        conn.rollback()
-        print(f"Delete job error: {e}")
-        return jsonify({"success": False, "message": "Server error."}), 500
-    finally:
-        cur.close()
-        conn.close()
-
-
-@client_bp.route("/job-applicants")
-def api_job_applicants():
-    """Get list of applicants for client's jobs"""
-    user_id = request.args.get("user_id", "").strip()
-    if not user_id:
-        return jsonify({"error": "user_id required"}), 400
-
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT ja.job_id, ja.worker_id, ja.status AS app_status,
-                  ja.created_at,
-                  j.title, j.amount, j.status AS job_status,
-                  w.name AS worker_name, w.trade AS worker_trade,
-                  w.trust_score AS worker_trust,
-                  w.jobs_completed AS worker_jobs
-           FROM job_applications ja
-           JOIN jobs  j ON j.id  = ja.job_id
-           JOIN users w ON w.id  = ja.worker_id
-           WHERE j.client_id = %s AND ja.status = 'pending'
-           ORDER BY ja.created_at DESC""",
-        (user_id,)
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    for r in rows:
-        r["worker_trust"] = float(r["worker_trust"] or 0)
-        r["amount"] = float(r["amount"] or 0)
-        r["created_at"] = str(r["created_at"])
-
-    return jsonify({"applicants": rows})
-
-
-@client_bp.route("/review-worker", methods=["POST"])
-def api_client_review_worker():
-    """Client approves or declines a worker application"""
-    data = request.get_json(silent=True) or {}
-    job_id = data.get("job_id")
-    user_id = str(data.get("user_id", "")).strip()
-    worker_id = str(data.get("worker_id", "")).strip()
-    action = data.get("action")
-
-    if not all([job_id, user_id, worker_id, action]) or action not in ("assign", "decline"):
-        return jsonify({"success": False, "message": "Missing fields."}), 400
-
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    try:
-        cur.execute(
-            "SELECT * FROM jobs WHERE id = %s AND client_id = %s",
-            (job_id, user_id)
-        )
-        job = cur.fetchone()
-        if not job:
-            return jsonify({"success": False, "message": "Job not found."}), 404
-
-        if action == "assign":
-            cur.execute(
-                """UPDATE jobs SET status = 'assigned', worker_id = %s
-                   WHERE id = %s""",
-                (worker_id, job_id)
-            )
-            cur.execute(
-                """UPDATE job_applications SET status = 'assigned'
-                   WHERE job_id = %s AND worker_id = %s""",
-                (job_id, worker_id)
-            )
-            cur.execute(
-                """UPDATE job_applications SET status = 'declined'
-                   WHERE job_id = %s AND worker_id != %s""",
-                (job_id, worker_id)
-            )
-            conn.commit()
-            return jsonify({"success": True, "action": "assign",
-                            "message": "Worker assigned!"})
-        else:
-            cur.execute(
-                """UPDATE job_applications SET status = 'declined'
-                   WHERE job_id = %s AND worker_id = %s""",
-                (job_id, worker_id)
-            )
-            conn.commit()
-            return jsonify({"success": True, "action": "decline",
-                            "message": "Worker declined."})
-
-    except Exception as e:
-        conn.rollback()
-        print(f"[review-worker error] {e}")
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()
         conn.close()
 
 
-@client_bp.route("/pay-escrow", methods=["POST"])
-def api_pay_escrow():
-    """Client marks escrow as paid"""
-    data = request.get_json(silent=True) or {}
-    job_id = data.get("job_id")
-    user_id = str(data.get("user_id", "")).strip()
-
-    if not job_id or not user_id:
-        return jsonify({"success": False, "message": "Missing fields."}), 400
+# ── Get Jobs ──────────────────────────────────────────────────────────────────
+@client_bp.route("/jobs")
+def api_client_jobs():
+    """Get all jobs posted by this client"""
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
 
     conn = get_db()
-    cur = conn.cursor(dictionary=True)
+    cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            "SELECT id, status, client_id, amount FROM jobs WHERE id = %s AND client_id = %s",
-            (job_id, user_id)
+            """SELECT j.*,
+                      j.platform_fee, j.client_pays, j.artisan_gets,
+                      u.name       AS worker_name,
+                      u.trade      AS worker_trade,
+                      u.trust_score AS worker_trust,
+                      u.phone      AS worker_phone
+               FROM jobs j
+               LEFT JOIN users u ON u.id = j.worker_id
+               WHERE j.client_id = %s
+               ORDER BY j.created_at DESC""",
+            (user_id,)
         )
-        job = cur.fetchone()
-        if not job:
-            return jsonify({"success": False, "message": "Job not found."}), 404
-        if job["status"] not in ("open", "assigned"):
-            return jsonify({"success": False, "message": "Job cannot be funded at this stage."}), 400
+        jobs = cur.fetchall()
+        for j in jobs:
+            j["amount"]       = float(j["amount"]       or 0)
+            j["platform_fee"] = float(j["platform_fee"] or 0)
+            j["client_pays"]  = float(j["client_pays"]  or 0)
+            j["artisan_gets"] = float(j["artisan_gets"] or 0)
+            j["worker_trust"] = float(j["worker_trust"] or 0) if j["worker_trust"] else None
+            j["created_at"]   = str(j["created_at"])
+            j["paid_at"]      = str(j["paid_at"]) if j.get("paid_at") else None
+        return jsonify({"jobs": jobs})
+    except Exception as e:
+        print(f"[client-jobs error] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Get Applicants ────────────────────────────────────────────────────────────
+@client_bp.route("/applicants")
+def api_client_applicants():
+    """Get all applicants for a specific job"""
+    job_id  = request.args.get("job_id",  "").strip()
+    user_id = request.args.get("user_id", "").strip()
+    if not job_id or not user_id:
+        return jsonify({"error": "job_id and user_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        # Verify job belongs to client
+        cur.execute("SELECT id FROM jobs WHERE id=%s AND client_id=%s", (job_id, user_id))
+        if not cur.fetchone():
+            return jsonify({"error": "Job not found or not yours"}), 404
 
         cur.execute(
-            "UPDATE jobs SET escrow_paid = 1, escrow_paid_at = NOW() WHERE id = %s",
+            """SELECT ja.id, ja.worker_id, ja.status, ja.created_at,
+                      u.name, u.trade, u.trust_score, u.jobs_completed, u.phone
+               FROM job_applications ja
+               JOIN users u ON u.id = ja.worker_id
+               WHERE ja.job_id = %s
+               ORDER BY u.trust_score DESC""",
             (job_id,)
         )
+        apps = cur.fetchall()
+        for a in apps:
+            a["trust_score"]    = float(a["trust_score"]    or 0)
+            a["jobs_completed"] = int(a["jobs_completed"]   or 0)
+            a["created_at"]     = str(a["created_at"])
+        return jsonify({"applicants": apps})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Assign Worker ─────────────────────────────────────────────────────────────
+@client_bp.route("/assign-worker", methods=["POST"])
+def api_assign_worker():
+    """Assign a worker to a job"""
+    data      = request.get_json(silent=True) or {}
+    job_id    = data.get("job_id")
+    worker_id = str(data.get("worker_id", "")).strip()
+    user_id   = str(data.get("user_id",   "")).strip()
+
+    if not all([job_id, worker_id, user_id]):
+        return jsonify({"success": False, "message": "job_id, worker_id and user_id required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status='open'",
+            (job_id, user_id)
+        )
+        job = cur.fetchone()
+        if not job:
+            return jsonify({"success": False, "message": "Job not found, not yours, or already assigned."}), 404
+
+        cur.execute(
+            "UPDATE jobs SET worker_id=%s, status='assigned', assigned_at=NOW() WHERE id=%s",
+            (worker_id, job_id)
+        )
+        # Reject other applicants
+        cur.execute(
+            """UPDATE job_applications SET status='rejected'
+               WHERE job_id=%s AND worker_id != %s""",
+            (job_id, worker_id)
+        )
+        cur.execute(
+            "UPDATE job_applications SET status='accepted' WHERE job_id=%s AND worker_id=%s",
+            (job_id, worker_id)
+        )
         conn.commit()
-        return jsonify({"success": True, "message": "Escrow funded. Worker can now begin."})
+        return jsonify({"success": True, "message": "Worker assigned successfully."})
     except Exception as e:
         conn.rollback()
         return jsonify({"success": False, "message": str(e)}), 500
@@ -312,454 +294,218 @@ def api_pay_escrow():
         conn.close()
 
 
-@client_bp.route("/pending-review-jobs")
-def api_client_pending_review_jobs():
-    """Get jobs where the artisan's GPS check passed and proof was submitted —
-    awaiting the client's approve/dispute decision before payment releases.
-    (Job status 'verified' — NOT 'pending_review', which is a different,
-    pre-existing status meaning 'worker application awaiting assignment'.)"""
-    user_id = request.args.get("user_id", "").strip()
-    if not user_id:
-        return jsonify({"error": "user_id required"}), 400
-
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT j.id, j.title, j.amount, j.status, j.verified_at, j.review_deadline,
-                  j.distance_meters, j.video_proof_path,
-                  w.id AS worker_id, w.name AS worker_name, w.trust_score AS worker_trust
-           FROM jobs j
-           JOIN users w ON w.id = j.worker_id
-           WHERE j.client_id = %s AND j.status = 'verified' AND j.paid_at IS NULL
-           ORDER BY j.verified_at DESC""",
-        (user_id,)
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    for r in rows:
-        r["amount"] = float(r["amount"] or 0)
-        r["worker_trust"] = float(r["worker_trust"] or 0)
-        r["distance_meters"] = float(r["distance_meters"]) if r["distance_meters"] else None
-        r["verified_at"] = str(r["verified_at"]) if r["verified_at"] else None
-        r["review_deadline"] = str(r["review_deadline"]) if r["review_deadline"] else None
-
-    return jsonify({"jobs": rows})
-
-
-@client_bp.route("/review-job", methods=["POST"])
-def api_client_review_job():
-    """Client approves (releases payment) or disputes the artisan's submitted work"""
-    data = request.get_json(silent=True) or {}
-    job_id = data.get("job_id")
+# ── Approve Job ───────────────────────────────────────────────────────────────
+@client_bp.route("/approve-job", methods=["POST"])
+def api_approve_job():
+    """
+    Client approves completed job.
+    Credits artisan's escrow_balance in DB.
+    Actual bank transfer happens when artisan withdraws.
+    """
+    data    = request.get_json(silent=True) or {}
+    job_id  = data.get("job_id")
     user_id = str(data.get("user_id", "")).strip()
-    action = data.get("action")
-    reason = data.get("reason", "").strip()
 
-    if not all([job_id, user_id, action]) or action not in ("approve", "dispute"):
-        return jsonify({"success": False, "message": "job_id, user_id and action ('approve'/'dispute') required."}), 400
+    if not job_id or not user_id:
+        return jsonify({"success": False, "message": "job_id and user_id required."}), 400
 
     conn = get_db()
-    cur = conn.cursor(dictionary=True)
+    cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            "SELECT * FROM jobs WHERE id = %s AND client_id = %s",
+            """SELECT * FROM jobs
+               WHERE id=%s AND client_id=%s
+               AND status IN ('verified','pending_verification')""",
             (job_id, user_id)
         )
         job = cur.fetchone()
-
         if not job:
-            return jsonify({"success": False, "message": "Job not found."}), 404
+            return jsonify({"success": False,
+                            "message": "Job not found or not eligible for approval."}), 404
 
-        if job["status"] != "verified":
-            return jsonify({
-                "success": False,
-                "message": f"Job is not awaiting review (status: {job['status']})."
-            }), 400
+        # Use stored artisan_gets (fee-adjusted amount)
+        # Fall back to raw amount if column not yet populated
+        artisan_gets = float(job.get("artisan_gets") or job["amount"] or 0)
 
-        if action == "approve":
-            transfer_reference = release_job_payment(job, cur)
-            conn.commit()
-
-            if transfer_reference is None:
-                # Someone else (auto-release scheduler, or a second click)
-                # already resolved this job in the moment between our SELECT
-                # and our UPDATE. Not an error — just tell the client where
-                # things actually landed.
-                cur.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
-                current = cur.fetchone()
-                return jsonify({
-                    "success": True,
-                    "action": "approve",
-                    "already_resolved": True,
-                    "message": f"This job was already resolved (status: {current['status']}).",
-                })
-
-            return jsonify({
-                "success": True,
-                "action": "approve",
-                "message": "Payment released to the artisan!",
-                "transfer_reference": transfer_reference
-            })
-
-        # action == "dispute"
-        # Atomic claim here too: only flips to disputed if it's STILL
-        # 'verified' with paid_at still NULL right now — same lock the
-        # auto-release scheduler and approve path use, so this can't race
-        # past a payment that already went out a split second earlier.
+        # Mark job paid
         cur.execute(
-            """UPDATE jobs SET status = 'disputed', dispute_reason = %s
-               WHERE id = %s AND status = 'verified' AND paid_at IS NULL""",
+            "UPDATE jobs SET status='paid', paid_at=NOW() WHERE id=%s",
+            (job_id,)
+        )
+
+        # Credit artisan's internal balance — no Squad/Paystack call here.
+        # Money moves to bank when artisan clicks Withdraw.
+        cur.execute(
+            """UPDATE users
+               SET escrow_balance = escrow_balance + %s,
+                   total_earned   = total_earned   + %s
+               WHERE id = %s""",
+            (artisan_gets, artisan_gets, job["worker_id"])
+        )
+
+        conn.commit()
+        return jsonify({
+            "success":     True,
+            "message":     "Job approved. Artisan's balance has been credited.",
+            "artisan_gets": artisan_gets,
+        })
+    except Exception as e:
+        conn.rollback()
+        print(f"[approve-job error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Dispute Job ───────────────────────────────────────────────────────────────
+@client_bp.route("/dispute-job", methods=["POST"])
+def api_dispute_job():
+    """Client raises a dispute on a verified job"""
+    data    = request.get_json(silent=True) or {}
+    job_id  = data.get("job_id")
+    user_id = str(data.get("user_id", "")).strip()
+    reason  = data.get("reason", "").strip()
+
+    if not job_id or not user_id or not reason:
+        return jsonify({"success": False, "message": "job_id, user_id and reason required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status='verified'",
+            (job_id, user_id)
+        )
+        job = cur.fetchone()
+        if not job:
+            return jsonify({"success": False,
+                            "message": "Job not found or not eligible for dispute."}), 404
+
+        cur.execute(
+            "UPDATE jobs SET status='disputed', dispute_reason=%s, disputed_at=NOW() WHERE id=%s",
             (reason, job_id)
         )
-        if cur.rowcount != 1:
-            conn.commit()
-            cur.execute("SELECT status FROM jobs WHERE id = %s", (job_id,))
-            current = cur.fetchone()
-            return jsonify({
-                "success": False,
-                "already_resolved": True,
-                "message": f"This job was already resolved before your dispute could be recorded (status: {current['status']})."
-            }), 409
-
         conn.commit()
-        return jsonify({
-            "success": True,
-            "action": "dispute",
-            "message": "Job flagged as disputed. Our team will review it."
-        })
-
+        return jsonify({"success": True, "message": "Dispute raised. Our team will review within 24 hours."})
     except Exception as e:
         conn.rollback()
-        print(f"[review-job error] {e}")
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()
         conn.close()
 
 
+# ── Get Bargains ──────────────────────────────────────────────────────────────
 @client_bp.route("/bargains")
 def api_client_bargains():
-    """Get all pending bargains for client's jobs"""
+    """Get all counter-offers on client's jobs"""
     user_id = request.args.get("user_id", "").strip()
     if not user_id:
         return jsonify({"error": "user_id required"}), 400
 
     conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT b.*, j.title AS job_title, j.amount AS original_amount,
-                  w.name AS worker_name, w.trust_score AS worker_trust,
-                  w.jobs_completed AS worker_jobs
-           FROM bargains b
-           JOIN jobs j ON j.id = b.job_id
-           JOIN users w ON w.id = b.worker_id
-           WHERE j.client_id = %s AND b.status = 'pending'
-           ORDER BY b.created_at DESC""",
-        (user_id,)
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    for r in rows:
-        r["proposed_price"] = float(r["proposed_price"])
-        r["original_amount"] = float(r["original_amount"])
-        r["worker_trust"] = float(r["worker_trust"] or 0)
-        r["created_at"] = str(r["created_at"])
-    return jsonify({"bargains": rows})
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT b.*, j.title AS job_title, j.amount AS job_amount,
+                      u.name AS worker_name, u.trade, u.trust_score
+               FROM bargains b
+               JOIN jobs  j ON j.id = b.job_id
+               JOIN users u ON u.id = b.worker_id
+               WHERE j.client_id = %s AND b.status = 'pending'
+               ORDER BY b.created_at DESC""",
+            (user_id,)
+        )
+        bargains = cur.fetchall()
+        for b in bargains:
+            b["proposed_price"] = float(b["proposed_price"] or 0)
+            b["job_amount"]     = float(b["job_amount"]     or 0)
+            b["trust_score"]    = float(b["trust_score"]    or 0)
+            b["created_at"]     = str(b["created_at"])
+        return jsonify({"bargains": bargains})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 
+# ── Respond to Bargain ────────────────────────────────────────────────────────
 @client_bp.route("/respond-bargain", methods=["POST"])
 def api_respond_bargain():
-    """Client accepts or rejects a bargain"""
-    data = request.get_json(silent=True) or {}
-    job_id = data.get("job_id")
-    user_id = str(data.get("user_id", "")).strip()
-    action = data.get("action")
+    """Client accepts or rejects a counter-offer"""
+    data       = request.get_json(silent=True) or {}
+    bargain_id = data.get("bargain_id")
+    user_id    = str(data.get("user_id", "")).strip()
+    action     = data.get("action", "").strip()   # 'accept' or 'reject'
 
-    if not all([job_id, user_id, action]) or action not in ("accept", "reject"):
-        return jsonify({"success": False, "message": "job_id, user_id and action required."}), 400
+    if not bargain_id or not user_id or action not in ("accept", "reject"):
+        return jsonify({"success": False,
+                        "message": "bargain_id, user_id and action (accept/reject) required."}), 400
 
     conn = get_db()
-    cur = conn.cursor(dictionary=True)
+    cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """SELECT j.*, u.name AS client_name
-               FROM jobs j
-               JOIN users u ON u.id = j.client_id
-               WHERE j.id = %s AND j.client_id = %s AND j.bargain_status = 'pending'""",
-            (job_id, user_id)
+            """SELECT b.*, j.client_id, j.status AS job_status
+               FROM bargains b
+               JOIN jobs j ON j.id = b.job_id
+               WHERE b.id=%s AND j.client_id=%s AND b.status='pending'""",
+            (bargain_id, user_id)
         )
-        job = cur.fetchone()
+        bargain = cur.fetchone()
+        if not bargain:
+            return jsonify({"success": False, "message": "Bargain not found or already responded."}), 404
 
-        if not job:
-            return jsonify({"success": False, "message": "No pending bargain found for this job."}), 404
+        cur.execute("UPDATE bargains SET status=%s WHERE id=%s", (action + 'd', bargain_id))
 
-        if job["status"] not in ("open",):
-            return jsonify({"success": False, "message": "Job is no longer open."}), 400
-
-        if action == "reject":
+        if action == "accept":
+            # Recalculate fees on new agreed amount
+            fees = calculate_fees(bargain["proposed_price"])
             cur.execute(
-                """UPDATE jobs SET
-                   bargain_status = 'rejected',
-                   bargain_price  = NULL,
-                   bargain_worker_id = NULL
-                   WHERE id = %s""",
-                (job_id,)
+                """UPDATE jobs
+                   SET amount=%s, platform_fee=%s, client_pays=%s, artisan_gets=%s,
+                       worker_id=%s, status='assigned', assigned_at=NOW()
+                   WHERE id=%s""",
+                (fees["amount"], fees["platform_fee"],
+                 fees["client_pays"], fees["artisan_gets"],
+                 bargain["worker_id"], bargain["job_id"])
             )
-            cur.execute(
-                "UPDATE bargains SET status = 'rejected' WHERE job_id = %s AND status = 'pending'",
-                (job_id,)
-            )
-            conn.commit()
-            return jsonify({"success": True, "action": "reject"})
-
-        # ACCEPT BARGAIN
-        agreed_amount = float(job["bargain_price"])
-        agreed_worker_id = job["bargain_worker_id"]
-
-        cur.execute(
-            """UPDATE jobs SET
-               amount            = %s,
-               worker_id         = %s,
-               status            = 'assigned',
-               bargain_status    = 'accepted'
-               WHERE id = %s""",
-            (agreed_amount, agreed_worker_id, job_id)
-        )
-
-        cur.execute(
-            "UPDATE bargains SET status = 'rejected' WHERE job_id = %s AND status = 'pending'",
-            (job_id,)
-        )
-        cur.execute(
-            """UPDATE bargains SET status = 'accepted'
-               WHERE job_id = %s AND worker_id = %s""",
-            (job_id, agreed_worker_id)
-        )
 
         conn.commit()
-
-        cur.execute("SELECT email FROM users WHERE id = %s", (job['client_id'],))
-        cl = cur.fetchone()
-        client_email = cl["email"] if cl else "client@skillchain.com"
-        squad = squad_create_collection_account(job_id, agreed_amount, client_email)
-
-        if squad.get("account_number"):
-            cur.execute(
-                """UPDATE jobs SET
-                   collection_account_number = %s,
-                   collection_bank_name      = %s,
-                   collection_bank_code      = %s,
-                   escrow_reference          = %s
-                   WHERE id = %s""",
-                (squad["account_number"], squad["bank_name"],
-                 squad.get("bank_code", ""), squad.get("reference", ""),
-                 job_id)
-            )
-            conn.commit()
-
         return jsonify({
             "success": True,
-            "action": "accept",
-            "payment": {
-                "account_number": squad.get("account_number", ""),
-                "bank_name": squad.get("bank_name", ""),
-                "amount": agreed_amount,
-            }
+            "action":  action,
+            "message": f"Counter-offer {'accepted' if action=='accept' else 'rejected'}."
         })
-
     except Exception as e:
         conn.rollback()
-        print(f"[respond-bargain error] {e}")
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()
         conn.close()
 
 
-@client_bp.route("/rate-worker", methods=["POST"])
-def api_rate_worker():
-    """Client rates a worker after job completion"""
-    data = request.get_json(silent=True) or {}
-    job_id = data.get("job_id")
-    user_id = str(data.get("user_id", "")).strip()
-    rating = data.get("rating")
-    comment = data.get("comment", "").strip()
-
-    if not all([job_id, user_id, rating]):
-        return jsonify({"success": False, "message": "job_id, user_id and rating required."}), 400
-
+# ── Fee Preview ───────────────────────────────────────────────────────────────
+@client_bp.route("/fee-preview")
+def api_fee_preview():
+    """
+    Lightweight endpoint so the post-job form can show a live fee
+    breakdown before the client submits. Call with ?amount=10000
+    """
     try:
-        rating = int(rating)
-        if not (1 <= rating <= 5):
-            raise ValueError
+        amount = float(request.args.get("amount", 0))
+        fees   = calculate_fees(amount)
+        return jsonify({
+            "success":    True,
+            "amount":     fees["amount"],
+            "your_fee":   fees["client_fee"],
+            "you_pay":    fees["client_pays"],
+            "artisan_gets": fees["artisan_gets"],
+            "platform_fee": fees["platform_fee"],
+            "cap_applied":  fees["client_fee"] >= MAX_CLIENT_FEE,
+            "cap_at":       MAX_CLIENT_FEE,
+        })
     except (ValueError, TypeError):
-        return jsonify({"success": False, "message": "Rating must be 1–5."}), 400
-
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    try:
-        cur.execute(
-            """SELECT id, status, distance_meters, worker_id, client_rating
-               FROM jobs WHERE id = %s AND client_id = %s""",
-            (job_id, user_id)
-        )
-        job = cur.fetchone()
-        if not job:
-            return jsonify({"success": False, "message": "Job not found."}), 404
-
-        if job["status"] not in ("verified", "paid"):
-            return jsonify({"success": False,
-                            "message": "You can only rate after the job is verified."}), 400
-
-        if job["distance_meters"] is None or float(job["distance_meters"]) > 100:
-            return jsonify({
-                "success": False,
-                "can_rate": False,
-                "message": "Worker was not within the job site GPS boundary — rating is disabled."
-            }), 403
-
-        if job["client_rating"] is not None:
-            return jsonify({"success": False, "message": "You have already rated this job."}), 400
-
-        cur.execute(
-            """UPDATE jobs SET client_rating = %s, client_rating_comment = %s,
-                               client_rated_at = NOW()
-               WHERE id = %s""",
-            (rating, comment, job_id)
-        )
-
-        cur.execute(
-            """UPDATE users SET
-               trust_score = (
-                 SELECT ROUND(AVG(client_rating), 2)
-                 FROM jobs
-                 WHERE worker_id = %s AND client_rating IS NOT NULL
-               )
-               WHERE id = %s""",
-            (job["worker_id"], job["worker_id"])
-        )
-
-        conn.commit()
-        return jsonify({"success": True, "message": "Rating saved."})
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
-    finally:
-        cur.close()
-        conn.close()
-
-
-@client_bp.route("/pending-workers")
-def api_client_pending_workers():
-    """Get assigned workers waiting for escrow funding"""
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT j.id, j.title, j.amount, j.status,
-                  w.id AS worker_id, w.name AS worker_name,
-                  w.trade AS worker_trade, w.trust_score AS worker_trust,
-                  w.jobs_completed AS worker_jobs, w.phone AS worker_phone
-           FROM jobs j
-           JOIN users w ON w.id = j.worker_id
-           WHERE j.client_id = %s
-             AND j.status = 'assigned'
-             AND j.escrow_paid = 0
-           ORDER BY j.created_at DESC""",
-        (user_id,)
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    for r in rows:
-        r["amount"] = float(r["amount"] or 0)
-        r["worker_trust"] = float(r["worker_trust"] or 0)
-    return jsonify({"pending": rows})
-
-
-@client_bp.route("/jobs-social")
-def api_client_jobs_social():
-    """Get client's jobs with social data (likes, comments, bargains)"""
-    user_id = request.args.get("user_id")
-    if not user_id:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT j.*,
-                  w.name AS worker_name, w.trust_score AS worker_trust,
-                  (SELECT COUNT(*) FROM job_likes    WHERE job_id = j.id) AS likes,
-                  (SELECT COUNT(*) FROM job_comments WHERE job_id = j.id) AS comment_count,
-                  (SELECT COUNT(*) FROM bargains WHERE job_id = j.id AND status = 'pending') AS bargain_count,
-                  j.escrow_paid,
-                  j.client_rating
-           FROM jobs j
-           LEFT JOIN users w ON w.id = j.worker_id
-           WHERE j.client_id = %s
-           ORDER BY j.created_at DESC""",
-        (user_id,)
-    )
-    jobs = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    for job in jobs:
-        job["amount"] = float(job["amount"] or 0)
-        job["distance_meters"] = float(job["distance_meters"]) if job["distance_meters"] else None
-        job["worker_trust"] = float(job["worker_trust"]) if job["worker_trust"] else None
-        job["created_at"] = str(job["created_at"])
-        job["verified_at"] = str(job["verified_at"]) if job["verified_at"] else None
-        job["paid_at"] = str(job["paid_at"]) if job["paid_at"] else None
-        job["review_deadline"] = str(job["review_deadline"]) if job.get("review_deadline") else None
-        job["escrow_paid"] = bool(job["escrow_paid"])
-
-    return jsonify({"jobs": jobs})
-
-
-@client_bp.route("/retry-payment/<int:job_id>", methods=['POST'])
-def retry_payment(job_id):
-    """Retry Squad payment link generation"""
-    try:
-        conn = get_db()
-        cur = conn.cursor(dictionary=True)
-        cur.execute(
-            """SELECT j.amount, u.email
-               FROM jobs j JOIN users u ON u.id = j.client_id
-               WHERE j.id = %s""",
-            (job_id,)
-        )
-        job = cur.fetchone()
-        if not job:
-            return jsonify({"success": False, "message": "Job not found"}), 404
-
-        squad_data = squad_create_collection_account(job_id, job['amount'], job['email'])
-
-        if squad_data and squad_data.get("account_number"):
-            cur.execute(
-                """UPDATE jobs SET
-                   collection_account_number = %s,
-                   collection_bank_name      = %s,
-                   collection_bank_code      = %s,
-                   escrow_reference          = %s
-                   WHERE id = %s""",
-                (squad_data["account_number"], squad_data["bank_name"],
-                 squad_data["bank_code"], squad_data.get("reference"), job_id)
-            )
-            conn.commit()
-            return jsonify({"success": True, "message": "Payment link generated!"})
-        else:
-            return jsonify({"success": False, "message": "Squad API failed. Check KYC settings."})
-    except Exception as e:
-        print(f"Error in retry-payment: {e}")
-        return jsonify({"success": False, "message": str(e)}), 500
-    finally:
-        cur.close()
-        conn.close()
+        return jsonify({"success": False, "message": "Invalid amount"}), 400
