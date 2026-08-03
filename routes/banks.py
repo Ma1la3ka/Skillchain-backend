@@ -33,7 +33,7 @@ def api_get_banks():
                 b_lower = {str(k).lower(): v for k, v in b.items()}
                 b_name = b_lower.get("label") or b_lower.get("name") or b_lower.get("bank_name") or "Unknown Bank"
                 b_code = b_lower.get("bank_code") or b_lower.get("code") or ""
-                banks.append({"name": str(b_name), "code": str(b_code)})
+                banks.append({"name": str(b_name), "code":  str(b_code)})
 
             return jsonify({"success": True, "banks": banks})
     except Exception as e:

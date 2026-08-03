@@ -41,8 +41,6 @@ def calculate_fees(amount):
         "artisan_gets": artisan_gets,
     }
 
-
-# ── Profile ───────────────────────────────────────────────────────────────────
 @client_bp.route("/profile")
 def api_client_profile():
     """Get client's full profile with job stats"""
@@ -241,6 +239,76 @@ def api_client_applicants():
             a["created_at"]     = str(a["created_at"])
         return jsonify({"applicants": apps})
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+# ── Job Applicants (all pending worker applications across client's jobs) ──────
+@client_bp.route("/job-applicants")
+def api_client_job_applicants():
+    """Get all pending worker applications for this client's jobs (used for dashboard banner)"""
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT ja.id, ja.job_id, ja.worker_id, ja.status, ja.created_at,
+                      j.title,
+                      u.name AS worker_name, u.trade AS worker_trade,
+                      u.trust_score AS worker_trust, u.jobs_completed AS worker_jobs
+               FROM job_applications ja
+               JOIN jobs j  ON j.id = ja.job_id
+               JOIN users u ON u.id = ja.worker_id
+               WHERE j.client_id = %s AND ja.status = 'pending'
+               ORDER BY ja.created_at DESC""",
+            (user_id,)
+        )
+        apps = cur.fetchall()
+        for a in apps:
+            a["worker_trust"] = float(a["worker_trust"] or 0)
+            a["worker_jobs"]  = int(a["worker_jobs"] or 0)
+            a["created_at"]   = str(a["created_at"])
+        return jsonify({"applicants": apps})
+    except Exception as e:
+        print(f"[job-applicants error] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Pending Review Jobs (work submitted, awaiting client approve/dispute) ──────
+@client_bp.route("/pending-review-jobs")
+def api_client_pending_review_jobs():
+    """Get jobs where worker submitted GPS-verified proof and client hasn't reviewed yet"""
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT j.*, u.name AS worker_name
+               FROM jobs j
+               LEFT JOIN users u ON u.id = j.worker_id
+               WHERE j.client_id = %s AND j.status = 'verified'
+               ORDER BY j.verified_at DESC""",
+            (user_id,)
+        )
+        jobs = cur.fetchall()
+        for j in jobs:
+            j["amount"]          = float(j["amount"] or 0)
+            j["distance_meters"] = float(j["distance_meters"]) if j.get("distance_meters") else None
+            j["created_at"]      = str(j["created_at"])
+            j["verified_at"]     = str(j["verified_at"]) if j.get("verified_at") else None
+        return jsonify({"jobs": jobs})
+    except Exception as e:
+        print(f"[pending-review-jobs error] {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
@@ -486,6 +554,203 @@ def api_respond_bargain():
         cur.close()
         conn.close()
 
+
+# ── Review Worker Application (assign or decline) ──────────────────────────────
+@client_bp.route("/review-worker", methods=["POST"])
+def api_review_worker():
+    """Client approves or declines a worker's application to a job"""
+    data      = request.get_json(silent=True) or {}
+    job_id    = data.get("job_id")
+    worker_id = str(data.get("worker_id", "")).strip()
+    user_id   = str(data.get("user_id", "")).strip()
+    action    = data.get("action", "").strip()  # 'assign' or 'decline'
+
+    if not all([job_id, worker_id, user_id]) or action not in ("assign", "decline"):
+        return jsonify({"success": False, "message": "job_id, worker_id, user_id and action (assign/decline) required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT ja.id FROM job_applications ja
+               JOIN jobs j ON j.id = ja.job_id
+               WHERE ja.job_id=%s AND ja.worker_id=%s AND j.client_id=%s AND ja.status='pending'""",
+            (job_id, worker_id, user_id)
+        )
+        if not cur.fetchone():
+            return jsonify({"success": False, "message": "Application not found or already resolved."}), 404
+
+        if action == "assign":
+            cur.execute("SELECT status FROM jobs WHERE id=%s AND client_id=%s", (job_id, user_id))
+            job = cur.fetchone()
+            if not job or job["status"] != "open":
+                return jsonify({"success": False, "message": "Job is no longer open."}), 409
+
+            cur.execute(
+                "UPDATE jobs SET worker_id=%s, status='assigned', assigned_at=NOW() WHERE id=%s",
+                (worker_id, job_id)
+            )
+            cur.execute(
+                "UPDATE job_applications SET status='rejected' WHERE job_id=%s AND worker_id != %s",
+                (job_id, worker_id)
+            )
+            cur.execute(
+                "UPDATE job_applications SET status='accepted' WHERE job_id=%s AND worker_id=%s",
+                (job_id, worker_id)
+            )
+        else:  # decline
+            cur.execute(
+                "UPDATE job_applications SET status='rejected' WHERE job_id=%s AND worker_id=%s",
+                (job_id, worker_id)
+            )
+
+        conn.commit()
+        return jsonify({"success": True, "action": action})
+    except Exception as e:
+        conn.rollback()
+        print(f"[review-worker error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Review Job Submission (approve payment or dispute) ─────────────────────────
+@client_bp.route("/review-job", methods=["POST"])
+def api_review_job():
+    """Client approves (releases payment) or disputes a verified job submission"""
+    data    = request.get_json(silent=True) or {}
+    job_id  = data.get("job_id")
+    user_id = str(data.get("user_id", "")).strip()
+    action  = data.get("action", "").strip()   # 'approve' or 'dispute'
+    reason  = data.get("reason", "").strip()
+
+    if not job_id or not user_id or action not in ("approve", "dispute"):
+        return jsonify({"success": False, "message": "job_id, user_id and action (approve/dispute) required."}), 400
+    if action == "dispute" and not reason:
+        return jsonify({"success": False, "message": "A reason is required to dispute."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status='verified'",
+            (job_id, user_id)
+        )
+        job = cur.fetchone()
+        if not job:
+            return jsonify({"success": False, "already_resolved": True,
+                            "message": "Job not found or already resolved."}), 404
+
+        if action == "approve":
+            artisan_gets = float(job.get("artisan_gets") or job["amount"] or 0)
+            cur.execute("UPDATE jobs SET status='paid', paid_at=NOW() WHERE id=%s", (job_id,))
+            cur.execute(
+                """UPDATE users SET escrow_balance = escrow_balance + %s,
+                   total_earned = total_earned + %s WHERE id=%s""",
+                (artisan_gets, artisan_gets, job["worker_id"])
+            )
+            message = "Payment released to the artisan."
+        else:
+            cur.execute(
+                "UPDATE jobs SET status='disputed', dispute_reason=%s, disputed_at=NOW() WHERE id=%s",
+                (reason, job_id)
+            )
+            message = "Dispute submitted. Our team will review within 24 hours."
+
+        conn.commit()
+        return jsonify({"success": True, "action": action, "message": message})
+    except Exception as e:
+        conn.rollback()
+        print(f"[review-job error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Rate Worker ──────────────────────────────────────────────────────────────
+@client_bp.route("/rate-worker", methods=["POST"])
+def api_rate_worker():
+    """Client rates a worker after a verified/paid job"""
+    data    = request.get_json(silent=True) or {}
+    job_id  = data.get("job_id")
+    user_id = str(data.get("user_id", "")).strip()
+    rating  = data.get("rating")
+    comment = data.get("comment", "").strip()
+
+    if not job_id or not user_id or not rating:
+        return jsonify({"success": False, "message": "job_id, user_id and rating required."}), 400
+
+    try:
+        rating = int(rating)
+        if rating < 1 or rating > 5:
+            raise ValueError
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "message": "Rating must be between 1 and 5."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT * FROM jobs WHERE id=%s AND client_id=%s
+               AND status IN ('verified','paid') AND distance_meters <= 100""",
+            (job_id, user_id)
+        )
+        job = cur.fetchone()
+        if not job:
+            return jsonify({"success": False, "message": "Job not eligible for rating."}), 404
+        if job.get("client_rating") is not None:
+            return jsonify({"success": False, "message": "This job has already been rated."}), 409
+
+        cur.execute(
+            "UPDATE jobs SET client_rating=%s, client_rating_comment=%s WHERE id=%s",
+            (rating, comment, job_id)
+        )
+        conn.commit()
+        return jsonify({"success": True, "message": "Rating saved."})
+    except Exception as e:
+        conn.rollback()
+        print(f"[rate-worker error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+# ── Delete Job ───────────────────────────────────────────────────────────────
+@client_bp.route("/delete-job", methods=["DELETE"])
+def api_delete_job():
+    """Delete a job — only allowed while status is still 'open'"""
+    data    = request.get_json(silent=True) or {}
+    job_id  = data.get("job_id")
+    user_id = str(data.get("user_id", "")).strip()
+
+    if not job_id or not user_id:
+        return jsonify({"success": False, "message": "job_id and user_id required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            "SELECT id FROM jobs WHERE id=%s AND client_id=%s AND status='open'",
+            (job_id, user_id)
+        )
+        if not cur.fetchone():
+            return jsonify({"success": False, "message": "Job not found, not yours, or no longer open."}), 404
+
+        cur.execute("DELETE FROM job_applications WHERE job_id=%s", (job_id,))
+        cur.execute("DELETE FROM bargains WHERE job_id=%s", (job_id,))
+        cur.execute("DELETE FROM jobs WHERE id=%s", (job_id,))
+        conn.commit()
+        return jsonify({"success": True, "message": "Job deleted."})
+    except Exception as e:
+        conn.rollback()
+        print(f"[delete-job error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 # ── Fee Preview ───────────────────────────────────────────────────────────────
 @client_bp.route("/fee-preview")
