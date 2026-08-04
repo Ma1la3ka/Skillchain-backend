@@ -11,6 +11,8 @@ from .profile      import profile_bp
 from .webhook      import webhook_bp
 from .banks        import banks_bp
 from .switch_role  import switch_bp   
+from .chat import chat_bp
+from .heartbeat import heartbeat_bp
 
 blueprints = [
     auth_bp,
@@ -23,4 +25,6 @@ blueprints = [
     webhook_bp,
     banks_bp,
     switch_bp,  
+    chat_bp,
+    heartbeat_bp
 ]

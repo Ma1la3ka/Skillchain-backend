@@ -479,8 +479,6 @@ def api_dispute_job():
         cur.close()
         conn.close()
 
-
-# ── Get Bargains ──────────────────────────────────────────────────────────────
 @client_bp.route("/bargains")
 def api_client_bargains():
     """Get all counter-offers on client's jobs"""
@@ -492,8 +490,9 @@ def api_client_bargains():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """SELECT b.*, j.title AS job_title, j.amount AS job_amount,
-                      u.name AS worker_name, u.trade, u.trust_score
+            """SELECT b.*, j.title AS job_title, j.amount AS original_amount,
+                      u.name AS worker_name, u.trade, 
+                      u.trust_score AS worker_trust, u.jobs_completed AS worker_jobs
                FROM bargains b
                JOIN jobs  j ON j.id = b.job_id
                JOIN users u ON u.id = b.worker_id
@@ -504,9 +503,10 @@ def api_client_bargains():
         bargains = cur.fetchall()
         for b in bargains:
             b["proposed_price"] = float(b["proposed_price"] or 0)
-            b["job_amount"]     = float(b["job_amount"]     or 0)
-            b["trust_score"]    = float(b["trust_score"]    or 0)
-            b["created_at"]     = str(b["created_at"])
+            b["original_amount"] = float(b["original_amount"] or 0)
+            b["worker_trust"]    = float(b["worker_trust"] or 0)
+            b["worker_jobs"]     = int(b["worker_jobs"] or 0)
+            b["created_at"]      = str(b["created_at"])
         return jsonify({"bargains": bargains})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -515,14 +515,15 @@ def api_client_bargains():
         conn.close()
 
 
-# ── Respond to Bargain ────────────────────────────────────────────────────────
 @client_bp.route("/respond-bargain", methods=["POST"])
 def api_respond_bargain():
-    """Client accepts or rejects a counter-offer"""
-    data       = request.get_json(silent=True) or {}
-    bargain_id = data.get("bargain_id")
-    user_id    = str(data.get("user_id", "")).strip()
-    action     = data.get("action", "").strip()   # 'accept' or 'reject'
+    """Client accepts or rejects a counter-offer. On reject, client may
+    optionally suggest a price the worker should try instead."""
+    data             = request.get_json(silent=True) or {}
+    bargain_id       = data.get("bargain_id")
+    user_id          = str(data.get("user_id", "")).strip()
+    action           = data.get("action", "").strip()   # 'accept' or 'reject'
+    suggested_price  = data.get("suggested_price")       # optional, only used on reject
 
     if not bargain_id or not user_id or action not in ("accept", "reject"):
         return jsonify({"success": False,
@@ -542,9 +543,9 @@ def api_respond_bargain():
         if not bargain:
             return jsonify({"success": False, "message": "Bargain not found or already responded."}), 404
 
-        cur.execute("UPDATE bargains SET status=%s WHERE id=%s", (action + 'd', bargain_id))
-
         if action == "accept":
+            cur.execute("UPDATE bargains SET status='accepted' WHERE id=%s", (bargain_id,))
+
             # Recalculate fees on new agreed amount
             fees = calculate_fees(bargain["proposed_price"])
             cur.execute(
@@ -555,6 +556,26 @@ def api_respond_bargain():
                 (fees["amount"], fees["platform_fee"],
                  fees["client_pays"], fees["artisan_gets"],
                  bargain["worker_id"], bargain["job_id"])
+            )
+
+            # Auto-reject every other pending bargain on this job —
+            # the job is no longer open for negotiation once one is accepted.
+            cur.execute(
+                "UPDATE bargains SET status='rejected' WHERE job_id=%s AND id != %s AND status='pending'",
+                (bargain["job_id"], bargain_id)
+            )
+
+        else:  # reject
+            try:
+                suggested = float(suggested_price) if suggested_price else None
+                if suggested is not None and suggested < 100:
+                    suggested = None
+            except (ValueError, TypeError):
+                suggested = None
+
+            cur.execute(
+                "UPDATE bargains SET status='rejected', client_suggested_price=%s WHERE id=%s",
+                (suggested, bargain_id)
             )
 
         conn.commit()
@@ -569,7 +590,6 @@ def api_respond_bargain():
     finally:
         cur.close()
         conn.close()
-
 
 # ── Review Worker Application (assign or decline) ──────────────────────────────
 @client_bp.route("/review-worker", methods=["POST"])

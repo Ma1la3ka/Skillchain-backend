@@ -402,3 +402,37 @@ def api_worker_withdraw():
     finally:
         cur.close()
         conn.close()
+
+@worker_bp.route("/my-bargains")
+def api_worker_my_bargains():
+    """Get all bargains this worker has made, across all jobs, with current status"""
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cur = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT b.*, j.title AS job_title, j.amount AS original_amount,
+                      j.status AS job_status, j.trade
+               FROM bargains b
+               JOIN jobs j ON j.id = b.job_id
+               WHERE b.worker_id = %s
+               ORDER BY b.created_at DESC
+               LIMIT 50""",
+            (user_id,)
+        )
+        bargains = cur.fetchall()
+        for b in bargains:
+            b["proposed_price"]          = float(b["proposed_price"] or 0)
+            b["original_amount"]         = float(b["original_amount"] or 0)
+            b["client_suggested_price"]  = float(b["client_suggested_price"]) if b.get("client_suggested_price") else None
+            b["created_at"]              = str(b["created_at"])
+        return jsonify({"bargains": bargains})
+    except Exception as e:
+        print(f"[my-bargains error] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
