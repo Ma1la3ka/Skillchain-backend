@@ -99,20 +99,17 @@ def api_client_profile():
         cur.close()
         conn.close()
 
-
-# ── Post Job ──────────────────────────────────────────────────────────────────
 @client_bp.route("/post-job", methods=["POST"])
 def api_post_job():
     """Post a new job with fee calculation"""
-    data        = request.get_json(silent=True) or {}
-    user_id     = str(data.get("user_id", "")).strip()
-    title       = data.get("title",       "").strip()
-    description = data.get("description", "").strip()
-    trade       = data.get("trade",       "").strip()
-    site_address= data.get("site_address","").strip()
-    lat         = data.get("site_lat")
-    lng         = data.get("site_lng")
-    raw_amount  = data.get("amount", 0)
+    user_id      = str(request.form.get("user_id", "")).strip()
+    title        = request.form.get("title", "").strip()
+    description  = request.form.get("description", "").strip()
+    trade        = request.form.get("trade", "").strip()
+    site_address = request.form.get("site_address", "").strip()
+    lat          = request.form.get("site_lat")
+    lng          = request.form.get("site_lng")
+    raw_amount   = request.form.get("amount", 0)
 
     if not all([user_id, title, trade, site_address, raw_amount]):
         return jsonify({"success": False,
@@ -143,6 +140,26 @@ def api_post_job():
         )
         conn.commit()
         job_id = cur.lastrowid
+
+        # ── Handle uploaded media files ──────────────────────────
+        import os
+        for key in request.files:
+            if key.startswith("media_"):
+                file = request.files[key]
+                if file and file.filename:
+                    ext   = os.path.splitext(file.filename)[1].lower() or ".jpg"
+                    fname = f"job_{job_id}_{key}{ext}"
+                    path  = os.path.join("static", "job_media", fname)
+                    os.makedirs(os.path.join("static", "job_media"), exist_ok=True)
+                    file.save(path)
+                    media_type = "video" if file.mimetype.startswith("video/") else "image"
+                    cur.execute(
+                        """INSERT INTO job_media (job_id, uploader_id, file_path, media_type)
+                           VALUES (%s, %s, %s, %s)""",
+                        (job_id, user_id, path, media_type)
+                    )
+        conn.commit()
+
         return jsonify({
             "success":     True,
             "job_id":      job_id,
@@ -162,7 +179,6 @@ def api_post_job():
     finally:
         cur.close()
         conn.close()
-
 
 # ── Get Jobs ──────────────────────────────────────────────────────────────────
 @client_bp.route("/jobs")
