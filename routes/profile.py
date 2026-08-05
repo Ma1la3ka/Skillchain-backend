@@ -86,6 +86,46 @@ def api_worker_public_profile():
         "rating_summary": rating_summary
     })
 
+    
+@profile_bp.route("/client/public-profile")
+def api_client_public_profile():
+    """Get public profile of a client — shown when a worker clicks their name in chat"""
+    client_id = request.args.get("client_id", "").strip()
+    if not client_id:
+        return jsonify({"error": "client_id required"}), 400
+
+    conn = get_db()
+    cur = conn.cursor(dictionary=True)
+
+    cur.execute(
+        """SELECT id, name, profile_photo_path, created_at
+           FROM users WHERE id = %s""",
+        (client_id,)
+    )
+    client = cur.fetchone()
+    if not client:
+        cur.close()
+        conn.close()
+        return jsonify({"error": "Client not found"}), 404
+    client["created_at"] = str(client["created_at"]) if client["created_at"] else None
+
+    cur.execute(
+        """SELECT
+             COUNT(*) AS total_jobs,
+             SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) AS completed_jobs
+           FROM jobs WHERE client_id = %s""",
+        (client_id,)
+    )
+    stats = cur.fetchone()
+    client["total_jobs"]     = int(stats["total_jobs"] or 0)
+    client["completed_jobs"] = int(stats["completed_jobs"] or 0)
+
+    cur.close()
+    conn.close()
+
+    return jsonify({"client": client})
+
+
 
 @profile_bp.route("/workers/search")
 def api_workers_search():
