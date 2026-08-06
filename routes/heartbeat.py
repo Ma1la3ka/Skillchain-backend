@@ -7,9 +7,13 @@ heartbeat_bp = Blueprint('heartbeat', __name__, url_prefix='/api')
 ONLINE_THRESHOLD_SECONDS = 60
 
 
-@heartbeat_bp.route("/heartbeat", methods=["POST"])
+@heartbeat_bp.route("/heartbeat", methods=["GET", "POST"])
 def api_heartbeat():
-    """Called every ~30s by any logged-in dashboard to mark the user as active."""
+    # GET requests (from UptimeRobot or browser) — just return alive status
+    if request.method == "GET":
+        return jsonify({"success": True, "status": "alive"})
+
+    # POST requests (from dashboard JS) — update last_seen_at
     data    = request.get_json(silent=True) or {}
     user_id = str(data.get("user_id", "")).strip()
     if not user_id:
