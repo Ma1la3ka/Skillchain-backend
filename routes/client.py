@@ -99,6 +99,89 @@ def api_client_profile():
         cur.close()
         conn.close()
 
+
+@client_bp.route("/send-offer", methods=["POST"])
+def api_client_send_offer():
+    """
+    Client sends a formal price offer to an artisan through chat.
+    Reuses the bargains table — same as worker bargaining but initiated by client.
+    """
+    data      = request.get_json(silent=True) or {}
+    job_id    = data.get("job_id")
+    client_id = str(data.get("user_id", "")).strip()
+    worker_id = str(data.get("worker_id", "")).strip()
+    amount    = data.get("amount")
+    message   = data.get("message", "").strip()
+
+    if not all([job_id, client_id, worker_id, amount]):
+        return jsonify({"success": False,
+                        "message": "job_id, user_id, worker_id and amount required."}), 400
+
+    try:
+        amount = float(amount)
+        if amount < 100:
+            return jsonify({"success": False, "message": "Minimum offer is ₦100"}), 400
+    except (ValueError, TypeError):
+        return jsonify({"success": False, "message": "Invalid amount"}), 400
+
+    fees = calculate_fees(amount)
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        # Verify job belongs to this client
+        cur.execute(
+            "SELECT id, status FROM jobs WHERE id = %s AND client_id = %s",
+            (job_id, client_id)
+        )
+        job = cur.fetchone()
+        if not job:
+            return jsonify({"success": False,
+                            "message": "Job not found or not yours."}), 404
+
+        if job["status"] not in ("open", "pending_review"):
+            return jsonify({"success": False,
+                            "message": f"Job is already {job['status']} — cannot send offer."}), 400
+
+        # Cancel any previous pending offers on this job between these two parties
+        cur.execute(
+            """UPDATE bargains SET status = 'cancelled'
+               WHERE job_id = %s AND worker_id = %s AND status = 'pending'""",
+            (job_id, worker_id)
+        )
+
+        # Insert new offer — initiated_by='client' distinguishes from worker bargains
+        cur.execute(
+            """INSERT INTO bargains
+               (job_id, worker_id, proposed_price, message, status,
+                initiated_by, created_at)
+               VALUES (%s, %s, %s, %s, 'pending', 'client', NOW())""",
+            (job_id, worker_id, amount, message or f"Price offer: ₦{amount:,.0f}")
+        )
+        bargain_id = cur.lastrowid
+        conn.commit()
+
+        return jsonify({
+            "success":    True,
+            "bargain_id": bargain_id,
+            "fee_breakdown": {
+                "agreed_amount": amount,
+                "client_pays":   fees["client_pays"],
+                "artisan_gets":  fees["artisan_gets"],
+                "platform_fee":  fees["platform_fee"],
+                "cap_applied":   fees["client_fee"] >= MAX_CLIENT_FEE,
+            }
+        })
+
+    except Exception as e:
+        conn.rollback()
+        print(f"[send-offer error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+        
 @client_bp.route("/post-job", methods=["POST"])
 def api_post_job():
     """Post a new job with fee calculation"""

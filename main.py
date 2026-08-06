@@ -23,7 +23,26 @@ def create_app():
     app.config["SESSION_COOKIE_HTTPONLY"] = SESSION_COOKIE_HTTPONLY
 
     # CORS
-    CORS(app, supports_credentials=True, origins=ALLOWED_ORIGINS)
+    CORS(app,
+     supports_credentials=True,
+     origins=ALLOWED_ORIGINS,
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     expose_headers=["Content-Type"]
+)
+
+    @app.before_request
+    def handle_preflight():
+
+        from flask import request, Response
+        if request.method == "OPTIONS":
+            res = Response()
+            res.headers["Access-Control-Allow-Origin"]  = request.headers.get("Origin", "*")
+            res.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+            res.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With"
+            res.headers["Access-Control-Allow-Credentials"] = "true"
+            res.headers["Access-Control-Max-Age"] = "86400"
+            return res, 200
 
     # No-cache middleware
     @app.after_request
