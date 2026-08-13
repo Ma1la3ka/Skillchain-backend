@@ -4,8 +4,50 @@ from database_helper import get_db
 from utils import haversine_distance
 import uuid
 import os
+import cloudinary
+import cloudinary.uploader
 
 worker_bp = Blueprint('worker', __name__, url_prefix='/api/worker')
+
+# UPDATE the upload-avatar route:
+@worker_bp.route("/upload-avatar", methods=["POST"])
+def api_upload_avatar():
+    user_id = request.form.get("user_id", "").strip()
+    file    = request.files.get("photo")
+    if not user_id or not file:
+        return jsonify({"success": False, "message": "Missing user_id or photo"}), 400
+
+    try:
+        # Upload directly to Cloudinary — permanent, survives redeploys
+        result = cloudinary.uploader.upload(
+            file,
+            public_id    = f"skillchain/avatars/user_{user_id}",
+            overwrite    = True,   # replaces old photo if they upload again
+            resource_type= "image",
+            transformation = [
+                {"width": 400, "height": 400, "crop": "fill", "gravity": "face"},
+                {"quality": "auto", "fetch_format": "auto"}
+            ]
+        )
+        photo_url = result["secure_url"]
+        # e.g. https://res.cloudinary.com/bc6ghvdv/image/upload/skillchain/avatars/user_123.jpg
+
+        conn = get_db()
+        cur  = conn.cursor()
+        try:
+            cur.execute(
+                "UPDATE users SET profile_photo_path = %s WHERE id = %s",
+                (photo_url, user_id)
+            )
+            conn.commit()
+            return jsonify({"success": True, "path": photo_url})
+        finally:
+            cur.close()
+            conn.close()
+
+    except Exception as e:
+        print(f"[upload-avatar error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
 
 
 @worker_bp.route("/profile")

@@ -7,6 +7,7 @@ load_dotenv()
 # Environment
 ENV = os.getenv("FLASK_ENV", "development")
 
+
 # Module-level configuration variables
 SECRET_KEY = os.getenv("SECRET_KEY", "skillchain-secret-key-change-in-production")
 SQUAD_KEY = os.getenv("SQUAD_SECRET_KEY")
@@ -17,6 +18,9 @@ if SQUAD_KEY and SQUAD_KEY.startswith("sandbox_sk_"):
     SQUAD_BASE_URL = "https://sandbox-api-d.squadco.com"
 else:
     SQUAD_BASE_URL = "https://api-d.squadco.com"
+
+
+CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 
 # MySQL Database configuration
 DB_CONFIG = {
