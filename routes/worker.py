@@ -352,35 +352,6 @@ def api_update_profile():
         cur.close()
         conn.close()
 
-@worker_bp.route("/upload-avatar", methods=["POST"])
-def api_upload_avatar():
-    user_id = request.form.get("user_id", "").strip()
-    file    = request.files.get("photo")
-    if not user_id or not file:
-        return jsonify({"success": False, "message": "Missing user_id or photo"}), 400
-
-    ext   = os.path.splitext(file.filename)[1].lower() or ".jpg"
-    fname = f"avatar_{user_id}{ext}"
-    path  = os.path.join("static", "avatars", fname)
-    os.makedirs(os.path.join("static", "avatars"), exist_ok=True)
-    file.save(path)
-
-    conn = get_db()
-    cur  = conn.cursor()
-    try:
-        cur.execute(
-            "UPDATE users SET profile_photo_path = %s WHERE id = %s",
-            (path, user_id)
-        )
-        conn.commit()
-        return jsonify({"success": True, "path": path})
-    except Exception as e:
-        conn.rollback()
-        return jsonify({"success": False, "message": str(e)}), 500
-    finally:
-        cur.close()
-        conn.close()
-
 
 @worker_bp.route("/withdraw", methods=["POST"])
 def api_worker_withdraw():
