@@ -19,7 +19,6 @@ def api_chat_conversations():
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
-        # Single query — pulls everything needed in one shot
         cur.execute("""
             SELECT
                 m.job_id,
@@ -63,16 +62,15 @@ def api_chat_conversations():
                      u.role
             ORDER BY last_at DESC
         """, (
-            user_id,                    # CASE sender
-            user_id, user_id,           # last_message subquery
-            user_id, user_id,           # last_sender_id subquery
-            user_id,                    # unread SUM
-            user_id,                    # CASE JOIN
-            user_id, user_id            # WHERE
+            user_id,
+            user_id, user_id,
+            user_id, user_id,
+            user_id,
+            user_id,
+            user_id, user_id
         ))
         rows = cur.fetchall()
 
-        # Deduplicate (job_id, other_user_id) — keep first (most recent)
         seen    = set()
         threads = []
         for r in rows:
@@ -125,7 +123,7 @@ def api_chat_thread():
     try:
         cur.execute(
             """SELECT id, job_id, sender_id, recipient_id,
-                      COALESCE(content, body) AS content,
+                      COALESCE(content, body) AS body,
                       created_at, read_at
                FROM messages
                WHERE job_id = %s
@@ -141,7 +139,6 @@ def api_chat_thread():
             m["created_at"] = str(m["created_at"])
             m["read_at"]    = str(m["read_at"]) if m["read_at"] else None
 
-        # Mark messages sent TO this user as read
         cur.execute(
             """UPDATE messages
                SET read_at = NOW()
@@ -172,7 +169,6 @@ def api_chat_send():
     recipient_id = str(data.get("recipient_id", "")).strip()
     content      = data.get("content", "").strip()
 
-    # Accept both 'content' and 'body' from frontend
     if not content:
         content = data.get("body", "").strip()
 

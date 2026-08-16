@@ -18,11 +18,10 @@ def api_upload_avatar():
         return jsonify({"success": False, "message": "Missing user_id or photo"}), 400
 
     try:
-        # Upload directly to Cloudinary — permanent, survives redeploys
         result = cloudinary.uploader.upload(
             file,
             public_id    = f"skillchain/avatars/user_{user_id}",
-            overwrite    = True,   # replaces old photo if they upload again
+            overwrite    = True,
             resource_type= "image",
             transformation = [
                 {"width": 400, "height": 400, "crop": "fill", "gravity": "face"},
@@ -30,7 +29,6 @@ def api_upload_avatar():
             ]
         )
         photo_url = result["secure_url"]
-        # e.g. https://res.cloudinary.com/bc6ghvdv/image/upload/skillchain/avatars/user_123.jpg
 
         conn = get_db()
         cur  = conn.cursor()
@@ -67,7 +65,7 @@ def api_worker_profile():
               total_withdrawn, bio, top_skills, profile_photo_path,
               escrow_balance, bank_account_no, bank_code, bank_name,
               bank_account_name
-       FROM users WHERE id = %s AND role = 'worker'""",
+       FROM users WHERE id = %s AND (role = 'worker' OR active_role = 'worker')""",
     (user_id,)
 )
     user = cur.fetchone()
@@ -95,7 +93,6 @@ def api_worker_profile():
     user["trust_score"] = float(user["trust_score"] or 0)
     user["escrow_balance"] = float(user["escrow_balance"] or 0)
 
-    # Convert top_skills from comma string to list
     if user.get("top_skills"):
         user["top_skills"] = [s.strip() for s in user["top_skills"].split(",") if s.strip()]
     else:
@@ -391,7 +388,6 @@ def api_worker_withdraw():
 
         reference = f"withdraw_{user_id}_{uuid.uuid4().hex[:8]}"
 
-        # Update total withdrawn
         cur.execute(
             "UPDATE users SET total_withdrawn = COALESCE(total_withdrawn, 0) + %s WHERE id = %s",
             (amount, user_id)
@@ -462,18 +458,16 @@ def api_worker_public_profile():
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
-        # Basic profile
         cur.execute("""
             SELECT id, name, trade, trust_score, jobs_completed,
                    profile_photo_path, top_skills, bio, phone,
                    last_seen_at
-            FROM users WHERE id = %s AND role = 'worker'
+            FROM users WHERE id = %s AND (role = 'worker' OR active_role = 'worker')
         """, (worker_id,))
         worker = cur.fetchone()
         if not worker:
             return jsonify({"error": "Worker not found"}), 404
 
-        # Online status
         online = False
         if worker["last_seen_at"]:
             cur.execute(
@@ -483,7 +477,6 @@ def api_worker_public_profile():
             diff   = cur.fetchone()["diff"]
             online = diff is not None and diff <= 60
 
-        # Convert top_skills
         if worker.get("top_skills"):
             worker["top_skills"] = [
                 s.strip() for s in worker["top_skills"].split(",") if s.strip()
@@ -491,7 +484,6 @@ def api_worker_public_profile():
         else:
             worker["top_skills"] = []
 
-        # Reviews
         cur.execute("""
             SELECT rating, comment, created_at
             FROM reviews
@@ -503,11 +495,9 @@ def api_worker_public_profile():
         for r in reviews:
             r["created_at"] = str(r["created_at"])
 
-        # Rating summary
         avg_rating    = sum(r["rating"] for r in reviews) / len(reviews) if reviews else 0
         total_ratings = len(reviews)
 
-        # Proof media
         cur.execute("""
             SELECT m.id, m.media_type, m.file_path, m.proof_lat,
                    m.proof_lng, m.created_at,
@@ -528,7 +518,6 @@ def api_worker_public_profile():
             m["proof_lat"]  = float(m["proof_lat"]) if m["proof_lat"] else None
             m["proof_lng"]  = float(m["proof_lng"]) if m["proof_lng"] else None
 
-        # Verification logs for GPS pass rate
         cur.execute("""
             SELECT result FROM verification_logs
             WHERE worker_id = %s
