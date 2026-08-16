@@ -5,13 +5,12 @@ from database_helper import get_db
 chat_bp = Blueprint('chat', __name__, url_prefix='/api/chat')
 
 
-
 @chat_bp.route("/conversations")
 def api_chat_conversations():
     """
-    Get all conversation threads for this user, WhatsApp-style —
-    one row per (job, other person) pair, with the last message,
-    timestamp, and unread count. Ordered by most recent activity.
+    Get all conversation threads for this user — one row per
+    (job_id, other_person) pair, most recent first.
+    Returns job_title, other_user_name, last message, unread count.
     """
     user_id = request.args.get("user_id", "").strip()
     if not user_id:
@@ -20,76 +19,82 @@ def api_chat_conversations():
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
-        # Every message this user sent or received, tagged with who the
-        # "other person" is in that row — then we collapse to one row
-        # per (job_id, other_person) by picking the latest message.
-        cur.execute(
-            """
+        # Single query — pulls everything needed in one shot
+        cur.execute("""
             SELECT
                 m.job_id,
-                IF(m.sender_id = %s, m.recipient_id, m.sender_id) AS other_id,
-                m.body            AS last_body,
-                m.created_at      AS last_at,
-                m.sender_id       AS last_sender_id
+                j.title                                             AS job_title,
+                CASE WHEN m.sender_id = %s
+                     THEN m.recipient_id
+                     ELSE m.sender_id END                           AS other_user_id,
+                u.name                                              AS other_user_name,
+                u.profile_photo_path                                AS other_user_photo,
+                u.role                                              AS other_user_role,
+                MAX(m.created_at)                                   AS last_at,
+                (SELECT COALESCE(m2.content, m2.body)
+                 FROM messages m2
+                 WHERE m2.job_id = m.job_id
+                   AND (
+                     (m2.sender_id = %s AND m2.recipient_id = u.id)
+                  OR (m2.sender_id = u.id AND m2.recipient_id = %s)
+                   )
+                 ORDER BY m2.created_at DESC LIMIT 1)               AS last_message,
+                (SELECT m3.sender_id
+                 FROM messages m3
+                 WHERE m3.job_id = m.job_id
+                   AND (
+                     (m3.sender_id = %s AND m3.recipient_id = u.id)
+                  OR (m3.sender_id = u.id AND m3.recipient_id = %s)
+                   )
+                 ORDER BY m3.created_at DESC LIMIT 1)               AS last_sender_id,
+                SUM(CASE WHEN m.recipient_id = %s
+                         AND m.read_at IS NULL THEN 1 ELSE 0 END)   AS unread_count
             FROM messages m
+            JOIN jobs  j ON j.id  = m.job_id
+            JOIN users u ON u.id  = CASE WHEN m.sender_id = %s
+                                         THEN m.recipient_id
+                                         ELSE m.sender_id END
             WHERE m.sender_id = %s OR m.recipient_id = %s
-            ORDER BY m.created_at DESC
-            """,
-            (user_id, user_id, user_id)
-        )
+            GROUP BY m.job_id,
+                     other_user_id,
+                     j.title,
+                     u.name,
+                     u.profile_photo_path,
+                     u.role
+            ORDER BY last_at DESC
+        """, (
+            user_id,                    # CASE sender
+            user_id, user_id,           # last_message subquery
+            user_id, user_id,           # last_sender_id subquery
+            user_id,                    # unread SUM
+            user_id,                    # CASE JOIN
+            user_id, user_id            # WHERE
+        ))
         rows = cur.fetchall()
 
-        # Collapse to latest message per (job_id, other_id) in Python —
-        # simpler and more portable than a correlated subquery, and this
-        # table will be small per-user for a long time.
-        seen = set()
+        # Deduplicate (job_id, other_user_id) — keep first (most recent)
+        seen    = set()
         threads = []
         for r in rows:
-            key = (r["job_id"], r["other_id"])
+            key = (r["job_id"], r["other_user_id"])
             if key in seen:
                 continue
             seen.add(key)
             threads.append(r)
 
-        if not threads:
-            return jsonify({"conversations": []})
-
-        # Enrich each thread with job title, other person's name/photo/role,
-        # and unread count for that specific thread.
         result = []
         for t in threads:
-            cur.execute(
-                "SELECT title FROM jobs WHERE id = %s",
-                (t["job_id"],)
-            )
-            job = cur.fetchone()
-
-            cur.execute(
-                "SELECT id, name, role, profile_photo_path FROM users WHERE id = %s",
-                (t["other_id"],)
-            )
-            other = cur.fetchone()
-            if not other:
-                continue  # other user deleted or bad data — skip
-
-            cur.execute(
-                """SELECT COUNT(*) AS c FROM messages
-                   WHERE job_id=%s AND sender_id=%s AND recipient_id=%s AND read_at IS NULL""",
-                (t["job_id"], t["other_id"], user_id)
-            )
-            unread = cur.fetchone()["c"]
-
             result.append({
-                "job_id":             t["job_id"],
-                "job_title":          job["title"] if job else "Job",
-                "other_id":           other["id"],
-                "other_name":         other["name"],
-                "other_role":         other["role"],
-                "other_photo":        other["profile_photo_path"],
-                "last_message":       t["last_body"],
-                "last_at":            str(t["last_at"]),
-                "last_from_me":       t["last_sender_id"] == int(user_id),
-                "unread_count":       unread,
+                "job_id":          t["job_id"],
+                "job_title":       t["job_title"]       or "Job",
+                "other_id":        t["other_user_id"],
+                "other_name":      t["other_user_name"] or "User",
+                "other_role":      t["other_user_role"] or "",
+                "other_photo":     t["other_user_photo"],
+                "last_message":    t["last_message"]    or "",
+                "last_at":         str(t["last_at"])    if t["last_at"] else "",
+                "last_from_me":    int(t["last_sender_id"] or 0) == int(user_id),
+                "unread_count":    int(t["unread_count"] or 0),
             })
 
         return jsonify({"conversations": result})
@@ -101,13 +106,16 @@ def api_chat_conversations():
         cur.close()
         conn.close()
 
-        
+
 @chat_bp.route("/thread")
 def api_chat_thread():
-    """Get all messages between two users for a specific job. Marks incoming messages as read."""
-    job_id     = request.args.get("job_id", "").strip()
-    user_id    = request.args.get("user_id", "").strip()
-    other_id   = request.args.get("other_id", "").strip()
+    """
+    Get all messages between two users for a specific job.
+    Marks incoming messages as read automatically.
+    """
+    job_id   = request.args.get("job_id",   "").strip()
+    user_id  = request.args.get("user_id",  "").strip()
+    other_id = request.args.get("other_id", "").strip()
 
     if not all([job_id, user_id, other_id]):
         return jsonify({"error": "job_id, user_id and other_id required"}), 400
@@ -116,9 +124,15 @@ def api_chat_thread():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """SELECT * FROM messages
-               WHERE job_id=%s
-                 AND ((sender_id=%s AND recipient_id=%s) OR (sender_id=%s AND recipient_id=%s))
+            """SELECT id, job_id, sender_id, recipient_id,
+                      COALESCE(content, body) AS content,
+                      created_at, read_at
+               FROM messages
+               WHERE job_id = %s
+                 AND (
+                   (sender_id = %s AND recipient_id = %s)
+                OR (sender_id = %s AND recipient_id = %s)
+                 )
                ORDER BY created_at ASC""",
             (job_id, user_id, other_id, other_id, user_id)
         )
@@ -129,12 +143,18 @@ def api_chat_thread():
 
         # Mark messages sent TO this user as read
         cur.execute(
-            "UPDATE messages SET read_at=NOW() WHERE job_id=%s AND sender_id=%s AND recipient_id=%s AND read_at IS NULL",
+            """UPDATE messages
+               SET read_at = NOW()
+               WHERE job_id      = %s
+                 AND sender_id   = %s
+                 AND recipient_id= %s
+                 AND read_at IS NULL""",
             (job_id, other_id, user_id)
         )
         conn.commit()
 
         return jsonify({"messages": messages})
+
     except Exception as e:
         print(f"[chat-thread error] {e}")
         return jsonify({"error": str(e)}), 500
@@ -148,22 +168,32 @@ def api_chat_send():
     """Send a message tied to a job"""
     data         = request.get_json(silent=True) or {}
     job_id       = data.get("job_id")
-    sender_id    = str(data.get("sender_id", "")).strip()
+    sender_id    = str(data.get("sender_id",    "")).strip()
     recipient_id = str(data.get("recipient_id", "")).strip()
-    body         = data.get("body", "").strip()
+    content      = data.get("content", "").strip()
 
-    if not all([job_id, sender_id, recipient_id, body]):
-        return jsonify({"success": False, "message": "job_id, sender_id, recipient_id and body required."}), 400
+    # Accept both 'content' and 'body' from frontend
+    if not content:
+        content = data.get("body", "").strip()
+
+    if not all([job_id, sender_id, recipient_id, content]):
+        return jsonify({
+            "success": False,
+            "message": "job_id, sender_id, recipient_id and content required."
+        }), 400
 
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            "INSERT INTO messages (job_id, sender_id, recipient_id, body) VALUES (%s,%s,%s,%s)",
-            (job_id, sender_id, recipient_id, body)
+            """INSERT INTO messages
+               (job_id, sender_id, recipient_id, body, content, created_at)
+               VALUES (%s, %s, %s, %s, %s, NOW())""",
+            (job_id, sender_id, recipient_id, content, content)
         )
         conn.commit()
         return jsonify({"success": True, "id": cur.lastrowid})
+
     except Exception as e:
         conn.rollback()
         print(f"[chat-send error] {e}")
@@ -175,7 +205,7 @@ def api_chat_send():
 
 @chat_bp.route("/unread-count")
 def api_chat_unread_count():
-    """Total unread messages for this user, across all jobs — for a sidebar badge"""
+    """Total unread messages for this user across all jobs — for sidebar badge"""
     user_id = request.args.get("user_id", "").strip()
     if not user_id:
         return jsonify({"error": "user_id required"}), 400
@@ -184,11 +214,15 @@ def api_chat_unread_count():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            "SELECT COUNT(*) AS c FROM messages WHERE recipient_id=%s AND read_at IS NULL",
+            """SELECT COUNT(*) AS c
+               FROM messages
+               WHERE recipient_id = %s AND read_at IS NULL""",
             (user_id,)
         )
         count = cur.fetchone()["c"]
-        return jsonify({"unread": count})
+        return jsonify({"unread": int(count or 0)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
         conn.close()
