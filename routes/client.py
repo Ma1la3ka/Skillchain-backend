@@ -154,8 +154,8 @@ def api_client_send_offer():
         cur.execute(
             """INSERT INTO bargains
                (job_id, worker_id, proposed_price, message, status,
-                initiated_by, created_at)
-               VALUES (%s, %s, %s, %s, 'pending', 'client', NOW())""",
+                created_at)
+               VALUES (%s, %s, %s, %s, 'pending', NOW())""",
             (job_id, worker_id, amount, message or f"Price offer: ₦{amount:,.0f}")
         )
         bargain_id = cur.lastrowid
