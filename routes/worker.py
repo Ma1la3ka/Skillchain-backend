@@ -449,3 +449,108 @@ def api_worker_my_bargains():
     finally:
         cur.close()
         conn.close()
+
+
+@worker_bp.route("/public-profile")
+def api_worker_public_profile():
+    """Public profile view — called by client when viewing a worker"""
+    worker_id = request.args.get("worker_id", "").strip()
+    viewer_id = request.args.get("viewer_id", "").strip()
+    if not worker_id:
+        return jsonify({"error": "worker_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        # Basic profile
+        cur.execute("""
+            SELECT id, name, trade, trust_score, jobs_completed,
+                   profile_photo_path, top_skills, bio, phone,
+                   last_seen_at
+            FROM users WHERE id = %s AND role = 'worker'
+        """, (worker_id,))
+        worker = cur.fetchone()
+        if not worker:
+            return jsonify({"error": "Worker not found"}), 404
+
+        # Online status
+        online = False
+        if worker["last_seen_at"]:
+            cur.execute(
+                "SELECT TIMESTAMPDIFF(SECOND, %s, NOW()) AS diff",
+                (worker["last_seen_at"],)
+            )
+            diff   = cur.fetchone()["diff"]
+            online = diff is not None and diff <= 60
+
+        # Convert top_skills
+        if worker.get("top_skills"):
+            worker["top_skills"] = [
+                s.strip() for s in worker["top_skills"].split(",") if s.strip()
+            ]
+        else:
+            worker["top_skills"] = []
+
+        # Reviews
+        cur.execute("""
+            SELECT rating, comment, created_at
+            FROM reviews
+            WHERE worker_id = %s
+            ORDER BY created_at DESC
+            LIMIT 20
+        """, (worker_id,))
+        reviews = cur.fetchall()
+        for r in reviews:
+            r["created_at"] = str(r["created_at"])
+
+        # Rating summary
+        avg_rating    = sum(r["rating"] for r in reviews) / len(reviews) if reviews else 0
+        total_ratings = len(reviews)
+
+        # Proof media
+        cur.execute("""
+            SELECT m.id, m.media_type, m.file_path, m.proof_lat,
+                   m.proof_lng, m.created_at,
+                   (SELECT COUNT(*) FROM media_likes WHERE media_id = m.id) AS likes,
+                   (SELECT COUNT(*) FROM media_comments WHERE media_id = m.id) AS comment_count,
+                   (SELECT COUNT(*) FROM media_likes
+                    WHERE media_id = m.id AND user_id = %s) AS user_liked
+            FROM job_media m
+            JOIN jobs j ON j.id = m.job_id
+            WHERE j.worker_id = %s AND j.status = 'paid'
+            ORDER BY m.created_at DESC
+            LIMIT 12
+        """, (viewer_id or 0, worker_id))
+        media = cur.fetchall()
+        for m in media:
+            m["created_at"] = str(m["created_at"])
+            m["user_liked"] = bool(m["user_liked"])
+            m["proof_lat"]  = float(m["proof_lat"]) if m["proof_lat"] else None
+            m["proof_lng"]  = float(m["proof_lng"]) if m["proof_lng"] else None
+
+        # Verification logs for GPS pass rate
+        cur.execute("""
+            SELECT result FROM verification_logs
+            WHERE worker_id = %s
+            ORDER BY created_at DESC
+            LIMIT 50
+        """, (worker_id,))
+        ver_logs = cur.fetchall()
+
+        return jsonify({
+            **worker,
+            "online":           online,
+            "avg_rating":       round(avg_rating, 1),
+            "total_ratings":    total_ratings,
+            "reviews":          reviews,
+            "media":            media,
+            "verification_logs": ver_logs,
+            "trust_score":      float(worker["trust_score"] or 0),
+        })
+
+    except Exception as e:
+        print(f"[public-profile error] {e}")
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
