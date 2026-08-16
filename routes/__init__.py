@@ -27,4 +27,5 @@ blueprints = [
     switch_bp,  
     chat_bp,
     heartbeat_bp
+    
 ]
