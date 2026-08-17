@@ -574,29 +574,30 @@ def api_worker_respond_bargain():
                             "message": "Offer not found or already responded."}), 404
 
         if action == "accept":
-            # Recalculate fees on the agreed amount
-            from client import calculate_fees
-            fees = calculate_fees(bargain["proposed_price"])
+            # Inline fee calculation — no import needed
+            amount       = float(bargain["proposed_price"])
+            client_fee   = min(round(amount * 0.025, 2), 1250.00)
+            artisan_fee  = min(round(amount * 0.025, 2), 1250.00)
+            platform_fee = client_fee + artisan_fee
+            client_pays  = round(amount + client_fee,  2)
+            artisan_gets = round(amount - artisan_fee, 2)
 
             cur.execute("UPDATE bargains SET status='accepted' WHERE id=%s", (bargain_id,))
 
             cur.execute(
                 """UPDATE jobs
-                   SET amount=%s, platform_fee=%s, client_pays=%s, artisan_gets=%s,
-                       worker_id=%s, status='assigned', assigned_at=NOW()
-                   WHERE id=%s""",
-                (fees["amount"], fees["platform_fee"],
-                 fees["client_pays"], fees["artisan_gets"],
-                 user_id, bargain["job_id"])
+                SET amount=%s, platform_fee=%s, client_pays=%s, artisan_gets=%s,
+                    worker_id=%s, status='assigned', assigned_at=NOW()
+                WHERE id=%s""",
+                (amount, platform_fee, client_pays, artisan_gets,
+                user_id, bargain["job_id"])
             )
 
-            # Reject every other pending bargain on this job
             cur.execute(
                 """UPDATE bargains SET status='rejected'
-                   WHERE job_id=%s AND id != %s AND status='pending'""",
+                WHERE job_id=%s AND id != %s AND status='pending'""",
                 (bargain["job_id"], bargain_id)
             )
-
         else:  # reject
             cur.execute(
                 "UPDATE bargains SET status='rejected' WHERE id=%s",
