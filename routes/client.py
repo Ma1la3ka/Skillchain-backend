@@ -152,18 +152,14 @@ def api_client_send_offer():
 
         # Insert new offer — initiated_by='client' distinguishes from worker bargains
                 # Insert or update — same as worker bargain but initiated by client
+        # FIND:
         cur.execute(
             """INSERT INTO bargains
-               (job_id, worker_id, proposed_price, message, status, created_at, initiated_by)
-               VALUES (%s, %s, %s, %s, 'pending', NOW(), 'client')
-               ON DUPLICATE KEY UPDATE
-                 proposed_price = VALUES(proposed_price),
-                 message        = VALUES(message),
-                 status         = 'pending',
-                 created_at     = NOW(),
-                 initiated_by   = VALUES(initiated_by)""",
-            (job_id, worker_id, amount, message or f"Price offer: ₦{amount:,.0f}")
-        )
+            (job_id, worker_id, proposed_price, message, status,
+                initiated_by, created_at)
+            VALUES (%s, %s, %s, %s, 'pending', 'client', NOW())""",
+            (job_id, worker_id, amount, message or f"Price offer: ₦{amount:,.0f}")[:255]  )
+        
         bargain_id = cur.lastrowid
         conn.commit()
 
@@ -604,7 +600,7 @@ def api_client_bargains():
     finally:
         cur.close()
         conn.close()
-        
+
 @client_bp.route("/respond-bargain", methods=["POST"])
 def api_respond_bargain():
     """Client accepts or rejects a counter-offer. On reject, client may
