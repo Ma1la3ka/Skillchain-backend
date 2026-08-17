@@ -565,8 +565,7 @@ def api_worker_respond_bargain():
             """SELECT b.*, j.client_id, j.status AS job_status
                FROM bargains b
                JOIN jobs j ON j.id = b.job_id
-               WHERE b.id = %s AND b.worker_id = %s AND b.status = 'pending'
-                 AND b.initiated_by = 'client'""",
+               WHERE b.id = %s AND b.worker_id = %s AND b.status = 'pending'""",
             (bargain_id, user_id)
         )
         bargain = cur.fetchone()

@@ -570,7 +570,6 @@ def api_dispute_job():
 
 @client_bp.route("/bargains")
 def api_client_bargains():
-    """Get all counter-offers on client's jobs"""
     user_id = request.args.get("user_id", "").strip()
     if not user_id:
         return jsonify({"error": "user_id required"}), 400
@@ -579,32 +578,33 @@ def api_client_bargains():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-        """SELECT b.*, j.title AS job_title, j.amount AS original_amount,
-                  u.name AS worker_name, u.trade, 
-                  u.trust_score AS worker_trust, u.jobs_completed AS worker_jobs
-           FROM bargains b
-           JOIN jobs  j ON j.id = b.job_id
-           JOIN users u ON u.id = b.worker_id
-           WHERE j.client_id = %s AND b.status = 'pending'
-             AND b.initiated_by = 'worker'
-           ORDER BY b.created_at DESC""",
-        (user_id,)
-    )
+            """SELECT b.*,
+                      j.title        AS job_title,
+                      j.amount       AS job_amount,
+                      u.name         AS worker_name,
+                      u.trade,
+                      u.trust_score,
+                      COALESCE(b.initiated_by, 'worker') AS initiated_by
+               FROM bargains b
+               JOIN jobs  j ON j.id  = b.job_id
+               JOIN users u ON u.id  = b.worker_id
+               WHERE j.client_id = %s
+               ORDER BY b.created_at DESC""",
+            (user_id,)
+        )
         bargains = cur.fetchall()
         for b in bargains:
             b["proposed_price"] = float(b["proposed_price"] or 0)
-            b["original_amount"] = float(b["original_amount"] or 0)
-            b["worker_trust"]    = float(b["worker_trust"] or 0)
-            b["worker_jobs"]     = int(b["worker_jobs"] or 0)
-            b["created_at"]      = str(b["created_at"])
+            b["job_amount"]     = float(b["job_amount"]     or 0)
+            b["trust_score"]    = float(b["trust_score"]    or 0)
+            b["created_at"]     = str(b["created_at"])
         return jsonify({"bargains": bargains})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
         conn.close()
-
-
+        
 @client_bp.route("/respond-bargain", methods=["POST"])
 def api_respond_bargain():
     """Client accepts or rejects a counter-offer. On reject, client may
