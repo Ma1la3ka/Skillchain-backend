@@ -151,11 +151,16 @@ def api_client_send_offer():
         )
 
         # Insert new offer — initiated_by='client' distinguishes from worker bargains
+                # Insert or update — same as worker bargain but initiated by client
         cur.execute(
             """INSERT INTO bargains
-               (job_id, worker_id, proposed_price, message, status,
-                created_at)
-               VALUES (%s, %s, %s, %s, 'pending', NOW())""",
+               (job_id, worker_id, proposed_price, message, status, created_at)
+               VALUES (%s, %s, %s, %s, 'pending', NOW())
+               ON DUPLICATE KEY UPDATE
+                 proposed_price = VALUES(proposed_price),
+                 message        = VALUES(message),
+                 status         = 'pending',
+                 created_at     = NOW()""",
             (job_id, worker_id, amount, message or f"Price offer: ₦{amount:,.0f}")
         )
         bargain_id = cur.lastrowid
