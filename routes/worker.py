@@ -253,12 +253,14 @@ def api_worker_bargain():
         )
 
         cur.execute(
-            """INSERT INTO bargains (job_id, worker_id, proposed_price, message, status)
-               VALUES (%s, %s, %s, %s, 'pending')
+            """INSERT INTO bargains
+               (job_id, worker_id, proposed_price, message, status, initiated_by)
+               VALUES (%s, %s, %s, %s, 'pending', 'worker')
                ON DUPLICATE KEY UPDATE
                  proposed_price = VALUES(proposed_price),
                  message        = VALUES(message),
-                 status         = 'pending'""",
+                 status         = 'pending',
+                 initiated_by   = VALUES(initiated_by)""",
             (job_id, user_id, price, message)
         )
         conn.commit()
@@ -424,7 +426,7 @@ def api_worker_my_bargains():
     try:
         cur.execute(
             """SELECT b.*, j.title AS job_title, j.amount AS original_amount,
-                      j.status AS job_status, j.trade
+                      j.status AS job_status, j.trade, b.initiated_by
                FROM bargains b
                JOIN jobs j ON j.id = b.job_id
                WHERE b.worker_id = %s
@@ -540,6 +542,78 @@ def api_worker_public_profile():
     except Exception as e:
         print(f"[public-profile error] {e}")
         return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+@worker_bp.route("/respond-bargain", methods=["POST"])
+def api_worker_respond_bargain():
+    """Worker accepts or rejects a client-initiated offer."""
+    data       = request.get_json(silent=True) or {}
+    bargain_id = data.get("bargain_id")
+    user_id    = str(data.get("user_id", "")).strip()
+    action     = data.get("action", "").strip()   # 'accept' or 'reject'
+
+    if not bargain_id or not user_id or action not in ("accept", "reject"):
+        return jsonify({"success": False,
+                        "message": "bargain_id, user_id and action (accept/reject) required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT b.*, j.client_id, j.status AS job_status
+               FROM bargains b
+               JOIN jobs j ON j.id = b.job_id
+               WHERE b.id = %s AND b.worker_id = %s AND b.status = 'pending'
+                 AND b.initiated_by = 'client'""",
+            (bargain_id, user_id)
+        )
+        bargain = cur.fetchone()
+        if not bargain:
+            return jsonify({"success": False,
+                            "message": "Offer not found or already responded."}), 404
+
+        if action == "accept":
+            # Recalculate fees on the agreed amount
+            from client import calculate_fees
+            fees = calculate_fees(bargain["proposed_price"])
+
+            cur.execute("UPDATE bargains SET status='accepted' WHERE id=%s", (bargain_id,))
+
+            cur.execute(
+                """UPDATE jobs
+                   SET amount=%s, platform_fee=%s, client_pays=%s, artisan_gets=%s,
+                       worker_id=%s, status='assigned', assigned_at=NOW()
+                   WHERE id=%s""",
+                (fees["amount"], fees["platform_fee"],
+                 fees["client_pays"], fees["artisan_gets"],
+                 user_id, bargain["job_id"])
+            )
+
+            # Reject every other pending bargain on this job
+            cur.execute(
+                """UPDATE bargains SET status='rejected'
+                   WHERE job_id=%s AND id != %s AND status='pending'""",
+                (bargain["job_id"], bargain_id)
+            )
+
+        else:  # reject
+            cur.execute(
+                "UPDATE bargains SET status='rejected' WHERE id=%s",
+                (bargain_id,)
+            )
+
+        conn.commit()
+        return jsonify({
+            "success": True,
+            "action":  action,
+            "message": f"Offer {'accepted' if action=='accept' else 'rejected'}."
+        })
+
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()
         conn.close()

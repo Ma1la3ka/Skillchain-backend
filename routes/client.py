@@ -154,13 +154,14 @@ def api_client_send_offer():
                 # Insert or update — same as worker bargain but initiated by client
         cur.execute(
             """INSERT INTO bargains
-               (job_id, worker_id, proposed_price, message, status, created_at)
-               VALUES (%s, %s, %s, %s, 'pending', NOW())
+               (job_id, worker_id, proposed_price, message, status, created_at, initiated_by)
+               VALUES (%s, %s, %s, %s, 'pending', NOW(), 'client')
                ON DUPLICATE KEY UPDATE
                  proposed_price = VALUES(proposed_price),
                  message        = VALUES(message),
                  status         = 'pending',
-                 created_at     = NOW()""",
+                 created_at     = NOW(),
+                 initiated_by   = VALUES(initiated_by)""",
             (job_id, worker_id, amount, message or f"Price offer: ₦{amount:,.0f}")
         )
         bargain_id = cur.lastrowid
@@ -578,16 +579,17 @@ def api_client_bargains():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """SELECT b.*, j.title AS job_title, j.amount AS original_amount,
-                      u.name AS worker_name, u.trade, 
-                      u.trust_score AS worker_trust, u.jobs_completed AS worker_jobs
-               FROM bargains b
-               JOIN jobs  j ON j.id = b.job_id
-               JOIN users u ON u.id = b.worker_id
-               WHERE j.client_id = %s AND b.status = 'pending'
-               ORDER BY b.created_at DESC""",
-            (user_id,)
-        )
+        """SELECT b.*, j.title AS job_title, j.amount AS original_amount,
+                  u.name AS worker_name, u.trade, 
+                  u.trust_score AS worker_trust, u.jobs_completed AS worker_jobs
+           FROM bargains b
+           JOIN jobs  j ON j.id = b.job_id
+           JOIN users u ON u.id = b.worker_id
+           WHERE j.client_id = %s AND b.status = 'pending'
+             AND b.initiated_by = 'worker'
+           ORDER BY b.created_at DESC""",
+        (user_id,)
+    )
         bargains = cur.fetchall()
         for b in bargains:
             b["proposed_price"] = float(b["proposed_price"] or 0)
