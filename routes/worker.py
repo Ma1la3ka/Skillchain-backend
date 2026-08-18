@@ -153,8 +153,10 @@ def api_worker_open_jobs():
              FROM jobs j
              LEFT JOIN users c ON c.id = j.client_id
              WHERE j.status = 'open'
-               AND j.worker_id IS NULL"""
-    params = []
+               AND j.worker_id IS NULL
+
+               AND j.client_id != %s"""
+    params = [user_id]
 
     if trade:
         sql += " AND j.trade = %s"
@@ -177,7 +179,6 @@ def api_worker_open_jobs():
 
     return jsonify({"jobs": jobs})
 
-
 @worker_bp.route("/accept-job", methods=["POST"])
 def api_worker_accept_job():
     """Worker applies for a job"""
@@ -191,11 +192,13 @@ def api_worker_accept_job():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT id, status FROM jobs WHERE id = %s", (job_id,))
+        cur.execute("SELECT id, status, client_id FROM jobs WHERE id = %s", (job_id,))
         job = cur.fetchone()
 
         if not job:
             return jsonify({"success": False, "message": "Job not found."}), 404
+        if str(job["client_id"]) == user_id:
+            return jsonify({"success": False, "message": "You can't accept your own job."}), 403
         if job["status"] != "open":
             return jsonify({"success": False, "message": "Job is no longer open."}), 409
 
@@ -238,10 +241,12 @@ def api_worker_bargain():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT id, status FROM jobs WHERE id = %s AND status = 'open'", (job_id,))
+        cur.execute("SELECT id, status, client_id FROM jobs WHERE id = %s AND status = 'open'", (job_id,))
         job = cur.fetchone()
         if not job:
             return jsonify({"success": False, "message": "Job not found or no longer open."}), 404
+        if str(job["client_id"]) == user_id:
+            return jsonify({"success": False, "message": "You can't bargain on your own job."}), 403
 
         # Block a second pending offer on this job+worker pair
         cur.execute(
@@ -319,9 +324,9 @@ def api_open_jobs_social():
                 LIMIT 1) AS my_bargain_price
         FROM jobs j
         LEFT JOIN users c ON c.id = j.client_id
-        WHERE j.status = 'open' AND j.worker_id IS NULL
+        WHERE j.status = 'open' AND j.worker_id IS NULL AND j.client_id != %s
     """
-    params = [user_id, user_id]
+    params = [user_id, user_id, user_id]
 
     if trade:
         sql += " AND j.trade = %s"
@@ -343,7 +348,6 @@ def api_open_jobs_social():
         job["my_bargain_price"] = float(job["my_bargain_price"]) if job["my_bargain_price"] else None
 
     return jsonify({"jobs": jobs})
-
 
 @worker_bp.route("/update-profile", methods=["POST"])
 def api_update_profile():

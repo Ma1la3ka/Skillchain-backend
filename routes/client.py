@@ -452,6 +452,8 @@ def api_assign_worker():
         job = cur.fetchone()
         if not job:
             return jsonify({"success": False, "message": "Job not found, not yours, or already assigned."}), 404
+        if worker_id == user_id:
+            return jsonify({"success": False, "message": "You can't assign yourself to your own job."}), 403
 
         cur.execute(
             "UPDATE jobs SET worker_id=%s, status='assigned', assigned_at=NOW() WHERE id=%s",
@@ -718,6 +720,9 @@ def api_review_worker():
             return jsonify({"success": False, "message": "Application not found or already resolved."}), 404
 
         if action == "assign":
+            if worker_id == user_id:
+                return jsonify({"success": False, "message": "You can't assign yourself to your own job."}), 403
+
             cur.execute("SELECT status FROM jobs WHERE id=%s AND client_id=%s", (job_id, user_id))
             job = cur.fetchone()
             if not job or job["status"] != "open":
