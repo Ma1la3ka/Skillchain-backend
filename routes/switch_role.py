@@ -261,6 +261,6 @@ def switch_role_me():
         "has_client_profile": has_client,
         "trade":              user["trade"],
         "trust_score":        float(user["trust_score"] or 0),
-        "can_switch_to_client": has_client and current_role != "client",
-        "can_switch_to_worker": has_worker and current_role != "worker",
+        "can_switch_to_client": current_role != "client",
+        "can_switch_to_worker": current_role != "worker",
     })
