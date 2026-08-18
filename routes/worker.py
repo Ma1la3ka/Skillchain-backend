@@ -243,6 +243,25 @@ def api_worker_bargain():
         if not job:
             return jsonify({"success": False, "message": "Job not found or no longer open."}), 404
 
+        # Block a second pending offer on this job+worker pair
+        cur.execute(
+            "SELECT id, initiated_by FROM bargains WHERE job_id=%s AND worker_id=%s AND status='pending'",
+            (job_id, user_id)
+        )
+        existing = cur.fetchone()
+        if existing:
+            waiting_on_you = existing["initiated_by"] == "client"
+            return jsonify({
+                "success": False,
+                "already_pending": True,
+                "waiting_on": "worker" if not waiting_on_you else "worker",
+                "message": ("The client already sent you an offer on this job — "
+                            "respond to it before sending a new one.")
+                           if waiting_on_you else
+                           ("You already have a pending offer on this job — "
+                            "wait for the client to respond before sending another.")
+            }), 409
+
         cur.execute(
             """UPDATE jobs SET
                bargain_price     = %s,
@@ -252,17 +271,20 @@ def api_worker_bargain():
             (price, user_id, job_id)
         )
 
-        cur.execute(
-            """INSERT INTO bargains
-               (job_id, worker_id, proposed_price, message, status, initiated_by)
-               VALUES (%s, %s, %s, %s, 'pending', 'worker')
-               ON DUPLICATE KEY UPDATE
-                 proposed_price = VALUES(proposed_price),
-                 message        = VALUES(message),
-                 status         = 'pending',
-                 initiated_by   = VALUES(initiated_by)""",
-            (job_id, user_id, price, message)
-        )
+        try:
+            cur.execute(
+                """INSERT INTO bargains
+                   (job_id, worker_id, proposed_price, message, status, initiated_by)
+                   VALUES (%s, %s, %s, %s, 'pending', 'worker')""",
+                (job_id, user_id, price, message)
+            )
+        except Exception:
+            conn.rollback()
+            return jsonify({
+                "success": False, "already_pending": True,
+                "message": "There's already a pending offer on this job."
+            }), 409
+
         conn.commit()
         return jsonify({"success": True, "message": "Bargain proposal sent to client."})
     except Exception as e:
@@ -562,12 +584,13 @@ def api_worker_respond_bargain():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """SELECT b.*, j.client_id, j.status AS job_status
-               FROM bargains b
-               JOIN jobs j ON j.id = b.job_id
-               WHERE b.id = %s AND b.worker_id = %s AND b.status = 'pending'""",
-            (bargain_id, user_id)
-        )
+    """SELECT b.*, j.client_id, j.status AS job_status
+       FROM bargains b
+       JOIN jobs j ON j.id = b.job_id
+       WHERE b.id = %s AND b.worker_id = %s AND b.status = 'pending'
+         AND b.initiated_by = 'client'""",
+    (bargain_id, user_id)
+)
         bargain = cur.fetchone()
         if not bargain:
             return jsonify({"success": False,

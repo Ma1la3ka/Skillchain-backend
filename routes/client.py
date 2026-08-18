@@ -129,37 +129,52 @@ def api_client_send_offer():
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
-        # Verify job belongs to this client
         cur.execute(
             "SELECT id, status FROM jobs WHERE id = %s AND client_id = %s",
             (job_id, client_id)
         )
         job = cur.fetchone()
         if not job:
-            return jsonify({"success": False,
-                            "message": "Job not found or not yours."}), 404
+            return jsonify({"success": False, "message": "Job not found or not yours."}), 404
 
         if job["status"] not in ("open", "pending_review"):
             return jsonify({"success": False,
                             "message": f"Job is already {job['status']} — cannot send offer."}), 400
 
-        # Cancel any previous pending offers on this job between these two parties
+        # Block a second pending offer on this job+worker pair
         cur.execute(
-            """UPDATE bargains SET status = 'cancelled'
-               WHERE job_id = %s AND worker_id = %s AND status = 'pending'""",
+            "SELECT id, initiated_by FROM bargains WHERE job_id=%s AND worker_id=%s AND status='pending'",
             (job_id, worker_id)
         )
+        existing = cur.fetchone()
+        if existing:
+            waiting_on_worker = existing["initiated_by"] == "client"
+            return jsonify({
+                "success": False,
+                "already_pending": True,
+                "message": ("You already sent this worker an offer on this job — "
+                            "wait for them to respond before sending another.")
+                           if waiting_on_worker else
+                           ("This worker already sent you an offer on this job — "
+                            "respond to it before sending a new one.")
+            }), 409
 
-        # Insert new offer — initiated_by='client' distinguishes from worker bargains
-                # Insert or update — same as worker bargain but initiated by client
-        # FIND:
-        cur.execute(
-            """INSERT INTO bargains
-            (job_id, worker_id, proposed_price, message, status,
-                initiated_by, created_at)
-            VALUES (%s, %s, %s, %s, 'pending', 'client', NOW())""",
-            (job_id, worker_id, amount, message or f"Price offer: ₦{amount:,.0f}")[:255]  )
-        
+        clean_message = (message or f"Price offer: ₦{amount:,.0f}")[:255]
+
+        try:
+            cur.execute(
+                """INSERT INTO bargains
+                   (job_id, worker_id, proposed_price, message, status, initiated_by, created_at)
+                   VALUES (%s, %s, %s, %s, 'pending', 'client', NOW())""",
+                (job_id, worker_id, amount, clean_message)
+            )
+        except Exception:
+            conn.rollback()
+            return jsonify({
+                "success": False, "already_pending": True,
+                "message": "There's already a pending offer on this job."
+            }), 409
+
         bargain_id = cur.lastrowid
         conn.commit()
 
@@ -182,7 +197,6 @@ def api_client_send_offer():
     finally:
         cur.close()
         conn.close()
-
         
 @client_bp.route("/post-job", methods=["POST"])
 def api_post_job():
@@ -619,12 +633,13 @@ def api_respond_bargain():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """SELECT b.*, j.client_id, j.status AS job_status
-               FROM bargains b
-               JOIN jobs j ON j.id = b.job_id
-               WHERE b.id=%s AND j.client_id=%s AND b.status='pending'""",
-            (bargain_id, user_id)
-        )
+    """SELECT b.*, j.client_id, j.status AS job_status
+       FROM bargains b
+       JOIN jobs j ON j.id = b.job_id
+       WHERE b.id=%s AND j.client_id=%s AND b.status='pending'
+         AND b.initiated_by = 'worker'""",
+    (bargain_id, user_id)
+)
         bargain = cur.fetchone()
         if not bargain:
             return jsonify({"success": False, "message": "Bargain not found or already responded."}), 404
