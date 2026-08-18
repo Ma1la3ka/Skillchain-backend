@@ -640,3 +640,36 @@ def api_worker_respond_bargain():
     finally:
         cur.close()
         conn.close()
+
+@worker_bp.route("/bargain-status")
+def api_bargain_status():
+    """Returns whether a job+worker pair has a pending bargain, and who initiated it.
+    Callable by either dashboard — client passes the worker being chatted with,
+    worker passes their own id."""
+    job_id    = request.args.get("job_id", "").strip()
+    worker_id = request.args.get("worker_id", "").strip()
+    if not job_id or not worker_id:
+        return jsonify({"error": "job_id and worker_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT id, proposed_price, initiated_by, message
+               FROM bargains
+               WHERE job_id=%s AND worker_id=%s AND status='pending'""",
+            (job_id, worker_id)
+        )
+        b = cur.fetchone()
+        if not b:
+            return jsonify({"pending": False})
+        return jsonify({
+            "pending":        True,
+            "bargain_id":     b["id"],
+            "initiated_by":   b["initiated_by"],
+            "proposed_price": float(b["proposed_price"]),
+            "message":        b["message"],
+        })
+    finally:
+        cur.close()
+        conn.close()
