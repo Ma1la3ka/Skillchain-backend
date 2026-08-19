@@ -694,7 +694,6 @@ def api_respond_bargain():
         cur.close()
         conn.close()
 
-# ── Review Worker Application (assign or decline) ──────────────────────────────
 @client_bp.route("/review-worker", methods=["POST"])
 def api_review_worker():
     """Client approves or declines a worker's application to a job"""
@@ -711,12 +710,13 @@ def api_review_worker():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            """SELECT ja.id FROM job_applications ja
+            """SELECT ja.id, ja.requested_location FROM job_applications ja
                JOIN jobs j ON j.id = ja.job_id
                WHERE ja.job_id=%s AND ja.worker_id=%s AND j.client_id=%s AND ja.status='pending'""",
             (job_id, worker_id, user_id)
         )
-        if not cur.fetchone():
+        app_row = cur.fetchone()
+        if not app_row:
             return jsonify({"success": False, "message": "Application not found or already resolved."}), 404
 
         if action == "assign":
@@ -728,9 +728,12 @@ def api_review_worker():
             if not job or job["status"] != "open":
                 return jsonify({"success": False, "message": "Job is no longer open."}), 409
 
+            work_location_type = app_row.get("requested_location") or "client_site"
+
             cur.execute(
-                "UPDATE jobs SET worker_id=%s, status='assigned', assigned_at=NOW() WHERE id=%s",
-                (worker_id, job_id)
+                """UPDATE jobs SET worker_id=%s, status='assigned', assigned_at=NOW(),
+                   work_location_type=%s WHERE id=%s""",
+                (worker_id, work_location_type, job_id)
             )
             cur.execute(
                 "UPDATE job_applications SET status='rejected' WHERE job_id=%s AND worker_id != %s",
@@ -755,8 +758,6 @@ def api_review_worker():
     finally:
         cur.close()
         conn.close()
-
-
 
 # ── Review Job Submission (approve payment or dispute) ─────────────────────────
 @client_bp.route("/review-job", methods=["POST"])

@@ -4,23 +4,19 @@ from database_helper import get_db
 from utils import haversine_distance
 import os
 import uuid
+import cloudinary
+import cloudinary.uploader
 
 media_bp = Blueprint('media', __name__, url_prefix='/api')
 
 
 @media_bp.route("/job/upload-media", methods=["POST"])
 def api_upload_media():
-    """Upload proof media (photos/videos) for a job.
-
-    If check_only=1 is passed, only runs the geofence check and returns
-    the result — no files are saved, no DB writes happen. The JS calls
-    this first to confirm the worker is in range before sending any blobs.
-    """
     job_id     = request.form.get("job_id")
     user_id    = request.form.get("user_id", "").strip()
     proof_lat  = request.form.get("proof_lat")
     proof_lng  = request.form.get("proof_lng")
-    check_only = request.form.get("check_only", "0") == "1"  # NEW
+    check_only = request.form.get("check_only", "0") == "1"
     files      = request.files.getlist("files")
 
     if not all([job_id, user_id]):
@@ -43,57 +39,69 @@ def api_upload_media():
         if not job:
             return jsonify({"success": False, "message": "Job not found or not assigned to you."}), 404
 
-        # Geofence check — always runs
+        # Determine geofence anchor based on where this job's work happens
+        if job.get("work_location_type") == "worker_shop":
+            cur.execute("SELECT shop_lat, shop_lng FROM users WHERE id = %s", (user_id,))
+            wu = cur.fetchone()
+            anchor_lat = float(wu["shop_lat"]) if wu and wu["shop_lat"] else None
+            anchor_lng = float(wu["shop_lng"]) if wu and wu["shop_lng"] else None
+        else:
+            anchor_lat = float(job["site_lat"]) if job["site_lat"] else None
+            anchor_lng = float(job["site_lng"]) if job["site_lng"] else None
+
         within_fence = False
         distance_m   = None
-        if proof_lat and proof_lng and job["site_lat"] and job["site_lng"]:
-            distance_m   = haversine_distance(
-                float(job["site_lat"]), float(job["site_lng"]),
-                proof_lat, proof_lng
-            )
-            within_fence = distance_m <= 150  # 150m — accounts for budget Android GPS drift
+        if proof_lat and proof_lng and anchor_lat and anchor_lng:
+            distance_m   = haversine_distance(anchor_lat, anchor_lng, proof_lat, proof_lng)
+            within_fence = distance_m <= 150
 
-        # ── check_only: return fence result, save nothing ─────────────────
         if check_only:
             return jsonify({
                 "success":      True,
                 "within_fence": within_fence,
                 "distance_m":   distance_m,
                 "can_be_rated": within_fence,
-                "media":        []          # nothing saved
+                "media":        []
             })
 
-        # ── Full upload: only reached after fence check passed on client ──
+        # ── Full upload: send to Cloudinary, no local disk ────────────────
         saved = []
-        os.makedirs("static/job_media", exist_ok=True)
 
         for f in files:
             if not f or not f.filename:
                 continue
 
-            ext = os.path.splitext(f.filename)[1].lower()
-            if not ext:
-                if f.content_type and "video" in f.content_type:
-                    ext = ".webm"
-                elif f.content_type and "image" in f.content_type:
-                    ext = ".jpg"
-                else:
-                    ext = ".bin"
+            is_video      = bool(f.content_type and "video" in f.content_type)
+            resource_type = "video" if is_video else "image"
 
-            fname = f"jm_{job_id}_{uuid.uuid4().hex[:8]}{ext}"
-            path  = os.path.join("static/job_media", fname)
-            f.save(path)
+            try:
+                result = cloudinary.uploader.upload(
+                    f,
+                    folder=f"skillchain/job_media/{job_id}",
+                    public_id=f"jm_{job_id}_{uuid.uuid4().hex[:8]}",
+                    resource_type=resource_type,
+                    **({} if is_video else {
+                        "transformation": [{"quality": "auto", "fetch_format": "auto"}]
+                    })
+                )
+            except Exception as up_err:
+                print(f"[upload-media cloudinary error] {up_err}")
+                continue
 
-            mtype = "video" if ext in (".mp4", ".webm", ".mov", ".avi") else "image"
+            file_url = result["secure_url"]
+            mtype    = "video" if is_video else "image"
 
             cur.execute(
                 """INSERT INTO job_media
                    (job_id, uploader_id, media_type, file_path, proof_lat, proof_lng)
                    VALUES (%s, %s, %s, %s, %s, %s)""",
-                (job_id, user_id, mtype, path, proof_lat, proof_lng)
+                (job_id, user_id, mtype, file_url, proof_lat, proof_lng)
             )
             media_id = cur.lastrowid
-            saved.append({"id": media_id, "path": path, "type": mtype})
+            saved.append({"id": media_id, "path": file_url, "type": mtype})
+
+        if not saved and files:
+            return jsonify({"success": False, "message": "Media upload failed. Please try again."}), 500
 
         if proof_lat and proof_lng:
             cur.execute(

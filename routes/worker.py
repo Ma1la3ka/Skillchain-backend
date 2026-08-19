@@ -47,7 +47,6 @@ def api_upload_avatar():
         print(f"[upload-avatar error] {e}")
         return jsonify({"success": False, "message": str(e)}), 500
 
-
 @worker_bp.route("/profile")
 def api_worker_profile():
     """Get worker's full profile with verification logs"""
@@ -64,7 +63,7 @@ def api_worker_profile():
               squad_account_number, squad_bank_name, squad_customer_id,
               total_withdrawn, bio, top_skills, profile_photo_path,
               escrow_balance, bank_account_no, bank_code, bank_name,
-              bank_account_name
+              bank_account_name, shop_lat, shop_lng, shop_address
        FROM users WHERE id = %s AND (role = 'worker' OR active_role = 'worker')""",
     (user_id,)
 )
@@ -92,6 +91,8 @@ def api_worker_profile():
 
     user["trust_score"] = float(user["trust_score"] or 0)
     user["escrow_balance"] = float(user["escrow_balance"] or 0)
+    user["shop_lat"] = float(user["shop_lat"]) if user["shop_lat"] else None
+    user["shop_lng"] = float(user["shop_lng"]) if user["shop_lng"] else None
 
     if user.get("top_skills"):
         user["top_skills"] = [s.strip() for s in user["top_skills"].split(",") if s.strip()]
@@ -100,7 +101,6 @@ def api_worker_profile():
 
     user["verification_logs"] = logs
     return jsonify(user)
-
 
 @worker_bp.route("/jobs")
 def api_worker_jobs():
@@ -185,6 +185,9 @@ def api_worker_accept_job():
     data = request.get_json(silent=True) or {}
     user_id = str(data.get("user_id", "")).strip()
     job_id = data.get("job_id")
+    requested_location = data.get("requested_location", "client_site").strip()
+    if requested_location not in ("client_site", "worker_shop"):
+        requested_location = "client_site"
 
     if not user_id or not job_id:
         return jsonify({"success": False, "message": "user_id and job_id required"}), 400
@@ -202,10 +205,17 @@ def api_worker_accept_job():
         if job["status"] != "open":
             return jsonify({"success": False, "message": "Job is no longer open."}), 409
 
+        # worker_shop only valid if this worker actually has a shop location saved
+        if requested_location == "worker_shop":
+            cur.execute("SELECT shop_lat, shop_lng FROM users WHERE id = %s", (user_id,))
+            wu = cur.fetchone()
+            if not wu or not wu["shop_lat"] or not wu["shop_lng"]:
+                requested_location = "client_site"
+
         cur.execute(
-            """INSERT IGNORE INTO job_applications (job_id, worker_id, status)
-               VALUES (%s, %s, 'pending')""",
-            (job_id, user_id)
+            """INSERT IGNORE INTO job_applications (job_id, worker_id, status, requested_location)
+               VALUES (%s, %s, 'pending', %s)""",
+            (job_id, user_id, requested_location)
         )
         conn.commit()
         return jsonify({"success": True,
@@ -217,7 +227,6 @@ def api_worker_accept_job():
     finally:
         cur.close()
         conn.close()
-
 
 @worker_bp.route("/bargain", methods=["POST"])
 def api_worker_bargain():
@@ -356,6 +365,10 @@ def api_update_profile():
     phone      = data.get("phone", "").strip()
     bio        = data.get("bio", "").strip()
     top_skills = data.get("top_skills", [])
+    shop_lat     = data.get("shop_lat")
+    shop_lng     = data.get("shop_lng")
+    shop_address = data.get("shop_address", "").strip()
+
     if not user_id:
         return jsonify({"success": False, "message": "user_id required"}), 400
 
@@ -365,8 +378,12 @@ def api_update_profile():
     cur  = conn.cursor()
     try:
         cur.execute(
-            "UPDATE users SET phone=%s, bio=%s, top_skills=%s WHERE id=%s",
-            (phone or None, bio or None, skills_str or None, user_id)
+            """UPDATE users SET phone=%s, bio=%s, top_skills=%s,
+               shop_lat=%s, shop_lng=%s, shop_address=%s
+               WHERE id=%s""",
+            (phone or None, bio or None, skills_str or None,
+             shop_lat or None, shop_lng or None, shop_address or None,
+             user_id)
         )
         conn.commit()
         return jsonify({"success": True})
@@ -376,7 +393,6 @@ def api_update_profile():
     finally:
         cur.close()
         conn.close()
-
 
 @worker_bp.route("/withdraw", methods=["POST"])
 def api_worker_withdraw():
