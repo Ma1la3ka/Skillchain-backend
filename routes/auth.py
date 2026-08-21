@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import random
 from database_helper import get_db
 from utils import send_reset_email
-
+from utils import send_reset_email, send_verification_email
 auth_bp = Blueprint('auth', __name__)
 
 WORKER_DASHBOARD = "https://skillchain-frontend-omega.vercel.app//Worker_dashboard/index.html"
@@ -31,16 +31,26 @@ def login():
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     cur.execute(
-        """SELECT id, name, email, role, active_role, has_client_profile, password_hash
-           FROM users WHERE email = %s""",
-        (email,)
-    )
+    """SELECT id, name, email, role, active_role, has_client_profile, password_hash, email_verified
+       FROM users WHERE email = %s""",
+    (email,)
+)
     user = cur.fetchone()
     cur.close()
     conn.close()
 
     if not (user and check_password_hash(user["password_hash"], password)):
         return jsonify({"success": False, "message": "Invalid email or password."}), 401
+
+    if not user.get("email_verified"):
+        return jsonify({
+            "success": False,
+            "needs_verify": True,
+            "email": user["email"],
+            "message": "Please verify your email before logging in."
+        }), 403
+
+    # ── Resolve where to send them ──... (rest unchanged)
 
     # ── Resolve where to send them ────────────────────────────────────────────
     primary_role       = user["role"]                     # permanent from registration
@@ -132,17 +142,25 @@ def register():
                             "errors": {"email": "This email is already registered."}}), 409
 
         pw_hash = generate_password_hash(password)
+        code    = str(random.randint(100000, 999999))
+        expiry  = datetime.now() + timedelta(minutes=10)
+
         cur.execute(
             """INSERT INTO users
-               (name, email, password_hash, role, phone, trade, has_client_profile, active_role)
-               VALUES (%s, %s, %s, %s, %s, %s, 0, NULL)""",
-            (name, email, pw_hash, role, phone, trade)
+               (name, email, password_hash, role, phone, trade, has_client_profile, active_role,
+                email_verified, email_verify_code, email_verify_expires)
+               VALUES (%s, %s, %s, %s, %s, %s, 0, NULL, 0, %s, %s)""",
+            (name, email, pw_hash, role, phone, trade, code, expiry)
         )
         conn.commit()
 
+        send_verification_email(email, code, name)
+
         return jsonify({
-            "success":  True,
-            "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html",
+            "success":       True,
+            "needs_verify":  True,
+            "email":         email,
+            "message":       "Account created! Check your email for a verification code.",
         })
 
     except Exception as e:
@@ -154,6 +172,91 @@ def register():
         cur.close()
         conn.close()
 
+
+@auth_bp.route("/verify-email", methods=["POST"])
+def verify_email():
+    data  = request.get_json(silent=True) or {}
+    email = data.get("email", "").strip().lower()
+    code  = data.get("code", "").strip()
+
+    if not email or not code:
+        return jsonify({"success": False, "message": "Email and code are required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT id, email_verified, email_verify_code, email_verify_expires
+               FROM users WHERE email = %s""",
+            (email,)
+        )
+        user = cur.fetchone()
+        if not user:
+            return jsonify({"success": False, "message": "Account not found."}), 404
+
+        if user["email_verified"]:
+            return jsonify({"success": True, "message": "Already verified.", "redirect":
+                             "https://skillchain-frontend-omega.vercel.app//Login/index.html"})
+
+        if not user["email_verify_code"] or datetime.now() > user["email_verify_expires"]:
+            return jsonify({"success": False, "message": "Code expired. Request a new one."}), 400
+
+        if code != user["email_verify_code"]:
+            return jsonify({"success": False, "message": "Incorrect code."}), 400
+
+        cur.execute(
+            """UPDATE users SET email_verified = 1, email_verify_code = NULL,
+               email_verify_expires = NULL WHERE id = %s""",
+            (user["id"],)
+        )
+        conn.commit()
+
+        return jsonify({
+            "success":  True,
+            "message":  "Email verified! You can now log in.",
+            "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html"
+        })
+    except Exception as e:
+        conn.rollback()
+        print(f"[verify-email error] {e}")
+        return jsonify({"success": False, "message": "Server error."}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@auth_bp.route("/resend-verification", methods=["POST"])
+def resend_verification():
+    data  = request.get_json(silent=True) or {}
+    email = data.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"success": False, "message": "Email is required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT id, name, email_verified FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
+        if not user:
+            return jsonify({"success": True, "message": "If that account exists, a new code was sent."})
+        if user["email_verified"]:
+            return jsonify({"success": True, "message": "Already verified — you can log in."})
+
+        code   = str(random.randint(100000, 999999))
+        expiry = datetime.now() + timedelta(minutes=10)
+        cur.execute(
+            "UPDATE users SET email_verify_code = %s, email_verify_expires = %s WHERE id = %s",
+            (code, expiry, user["id"])
+        )
+        conn.commit()
+        send_verification_email(email, code, user.get("name", "User"))
+        return jsonify({"success": True, "message": "A new code has been sent."})
+    except Exception as e:
+        print(f"[resend-verification error] {e}")
+        return jsonify({"success": False, "message": "Server error."}), 500
+    finally:
+        cur.close()
+        conn.close()
 
 @auth_bp.route("/api/me")
 def api_me():

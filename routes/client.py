@@ -259,9 +259,41 @@ def api_post_job():
                     )
         conn.commit()
 
+        # ── Generate Paystack escrow collection link ──────────────
+        payment_info = None
+        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+        client_row = cur.fetchone()
+        client_email = client_row["email"] if client_row else None
+
+        if client_email:
+            from utils import paystack_create_collection_account
+            collection = paystack_create_collection_account(job_id, fees["client_pays"], client_email)
+
+            if collection:
+                cur.execute(
+                    """UPDATE jobs SET
+                       collection_account_number = %s,
+                       collection_bank_name      = %s,
+                       collection_bank_code      = %s,
+                       escrow_reference           = %s
+                       WHERE id = %s""",
+                    (collection.get("account_number"), collection.get("bank_name"),
+                     collection.get("bank_code"), collection.get("reference"), job_id)
+                )
+                conn.commit()
+                payment_info = {
+                    "account_number": collection.get("account_number"),
+                    "bank_name":      collection.get("bank_name"),
+                    "amount":         fees["client_pays"],
+                    "reference":      collection.get("reference"),
+                }
+            else:
+                print(f"[post-job] Could not generate Paystack payment link for job {job_id}")
+
         return jsonify({
             "success":     True,
             "job_id":      job_id,
+            "payment":     payment_info,
             "fee_breakdown": {
                 "job_amount":   fees["amount"],
                 "your_fee":     fees["client_fee"],
@@ -279,6 +311,7 @@ def api_post_job():
         cur.close()
         conn.close()
 
+        
 # ── Get Jobs ──────────────────────────────────────────────────────────────────
 @client_bp.route("/jobs")
 def api_client_jobs():

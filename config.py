@@ -10,15 +10,12 @@ ENV = os.getenv("FLASK_ENV", "development")
 
 # Module-level configuration variables
 SECRET_KEY = os.getenv("SECRET_KEY", "skillchain-secret-key-change-in-production")
-SQUAD_KEY = os.getenv("SQUAD_SECRET_KEY")
 DEBUG = os.getenv("FLASK_DEBUG", "True").lower() == "true" if ENV == "development" else False
 
-# Squad API configuration
-if SQUAD_KEY and SQUAD_KEY.startswith("sandbox_sk_"):
-    SQUAD_BASE_URL = "https://sandbox-api-d.squadco.com"
-else:
-    SQUAD_BASE_URL = "https://api-d.squadco.com"
-
+# Paystack API configuration
+PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "")
+PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY", "")
+PAYSTACK_BASE_URL   = "https://api.paystack.co"
 
 CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 
@@ -36,12 +33,6 @@ SESSION_COOKIE_SAMESITE = "None"
 SESSION_COOKIE_SECURE = False if ENV == "development" else True
 SESSION_COOKIE_HTTPONLY = True
 ALLOWED_ORIGINS = ["https://skillchain-frontend-omega.vercel.app", "http://localhost:5501", "http://localhost:5502", ]
-
-# Squad API headers
-SQUAD_HEADERS = {
-    "Authorization": f"Bearer {SQUAD_KEY}" if SQUAD_KEY else "",
-    "Content-Type": "application/json"
-}
 
 # Email configuration (MUST be before validation prints)
 MAIL_SERVER = "smtp.gmail.com"
@@ -64,6 +55,8 @@ print(f"  Server: {MAIL_SERVER}")
 print(f"  Port: {MAIL_PORT}")
 print(f"  Username: {MAIL_USERNAME}")
 print(f"  Sender: {MAIL_DEFAULT_SENDER}")
+print(f"[CONFIG] Paystack Configuration:")
+print(f"  Secret Key: {'set (' + PAYSTACK_SECRET_KEY[:7] + '...)' if PAYSTACK_SECRET_KEY else 'NOT SET'}")
 print(f"{'='*60}\n")
 
 # Check for missing critical config
@@ -73,13 +66,16 @@ if not DB_CONFIG.get('user'):
     print("[WARNING] DB_USER environment variable not set!")
 if not DB_CONFIG.get('password'):
     print("[WARNING] DB_PASSWORD environment variable not set!")
+if not PAYSTACK_SECRET_KEY:
+    print("[WARNING] PAYSTACK_SECRET_KEY environment variable not set!")
 
 
 class Config:
     """Base configuration class"""
     SECRET_KEY = SECRET_KEY
-    SQUAD_KEY = SQUAD_KEY
-    SQUAD_BASE_URL = SQUAD_BASE_URL
+    PAYSTACK_SECRET_KEY = PAYSTACK_SECRET_KEY
+    PAYSTACK_PUBLIC_KEY = PAYSTACK_PUBLIC_KEY
+    PAYSTACK_BASE_URL = PAYSTACK_BASE_URL
     DB_CONFIG = DB_CONFIG
     SESSION_COOKIE_SAMESITE = SESSION_COOKIE_SAMESITE
     SESSION_COOKIE_SECURE = SESSION_COOKIE_SECURE
@@ -91,28 +87,23 @@ class Config:
     MAIL_DEFAULT_SENDER = MAIL_DEFAULT_SENDER
     SESSION_COOKIE_HTTPONLY = SESSION_COOKIE_HTTPONLY
     ALLOWED_ORIGINS = ALLOWED_ORIGINS
-    SQUAD_HEADERS = SQUAD_HEADERS
 
 
 class DevelopmentConfig(Config):
-    """Development configuration"""
     DEBUG = True
     TESTING = False
 
 
 class ProductionConfig(Config):
-    """Production configuration"""
     DEBUG = False
     SESSION_COOKIE_SECURE = True
 
 
 class TestingConfig(Config):
-    """Testing configuration"""
     TESTING = True
     DEBUG = True
 
 
-# Configuration selector
 config = {
     "development": DevelopmentConfig,
     "production": ProductionConfig,

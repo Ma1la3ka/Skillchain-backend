@@ -393,7 +393,6 @@ def api_update_profile():
     finally:
         cur.close()
         conn.close()
-
 @worker_bp.route("/withdraw", methods=["POST"])
 def api_worker_withdraw():
     """Worker withdraws balance to their bank account"""
@@ -403,9 +402,10 @@ def api_worker_withdraw():
     bank_code = data.get("bank_code", "").strip()
     account_no = data.get("account_no", "").strip()
     account_name = data.get("account_name", "").strip()
+    pin = str(data.get("pin", "")).strip()
 
-    if not all([user_id, amount, bank_code, account_no]):
-        return jsonify({"success": False, "message": "All fields required."}), 400
+    if not all([user_id, amount, bank_code, account_no, pin]):
+        return jsonify({"success": False, "message": "All fields, including your withdrawal PIN, are required."}), 400
 
     bank_code = bank_code.zfill(6)
 
@@ -419,10 +419,16 @@ def api_worker_withdraw():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT name FROM users WHERE id = %s", (user_id,))
+        cur.execute("SELECT name, withdrawal_pin_hash FROM users WHERE id = %s", (user_id,))
         worker = cur.fetchone()
         if not worker:
             return jsonify({"success": False, "message": "Worker not found."}), 404
+        if not worker["withdrawal_pin_hash"]:
+            return jsonify({"success": False, "message": "Set a withdrawal PIN first.", "needs_pin_setup": True}), 403
+        if not check_password_hash(worker["withdrawal_pin_hash"], pin):
+            return jsonify({"success": False, "message": "Incorrect withdrawal PIN."}), 403
+
+        # ...rest of the function unchanged from here...
 
         cur.execute(
             "UPDATE users SET bank_code = %s, bank_account_no = %s WHERE id = %s",
@@ -690,6 +696,68 @@ def api_bargain_status():
             "proposed_price": float(b["proposed_price"]),
             "message":        b["message"],
         })
+    finally:
+        cur.close()
+        conn.close()
+
+from werkzeug.security import generate_password_hash, check_password_hash
+
+@worker_bp.route("/pin-status")
+def api_pin_status():
+    """Tells the frontend whether this worker has set a withdrawal PIN yet —
+    used to decide whether to show the setup popup."""
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT withdrawal_pin_hash FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "User not found"}), 404
+        return jsonify({"pin_set": bool(row["withdrawal_pin_hash"])})
+    finally:
+        cur.close()
+        conn.close()
+
+
+@worker_bp.route("/set-pin", methods=["POST"])
+def api_set_pin():
+    """Set or change the withdrawal PIN. If a PIN already exists, the caller
+    must supply current_pin to prove they can change it (this is the 'reset'
+    path — not a forgot-PIN flow, which would need the reset-password-style
+    email token instead)."""
+    data        = request.get_json(silent=True) or {}
+    user_id     = str(data.get("user_id", "")).strip()
+    new_pin     = str(data.get("new_pin", "")).strip()
+    current_pin = str(data.get("current_pin", "")).strip()
+
+    if not user_id or not new_pin:
+        return jsonify({"success": False, "message": "user_id and new_pin required."}), 400
+    if not new_pin.isdigit() or not (4 <= len(new_pin) <= 6):
+        return jsonify({"success": False, "message": "PIN must be 4–6 digits."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT withdrawal_pin_hash FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"success": False, "message": "User not found."}), 404
+
+        if row["withdrawal_pin_hash"]:
+            if not current_pin or not check_password_hash(row["withdrawal_pin_hash"], current_pin):
+                return jsonify({"success": False, "message": "Current PIN is incorrect."}), 403
+
+        new_hash = generate_password_hash(new_pin)
+        cur.execute("UPDATE users SET withdrawal_pin_hash = %s WHERE id = %s", (new_hash, user_id))
+        conn.commit()
+        return jsonify({"success": True, "message": "Withdrawal PIN saved."})
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()
         conn.close()

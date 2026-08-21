@@ -57,6 +57,69 @@ def squad_create_virtual_account(user_id, name, email, phone):
     }
 
 
+def _send_verification_email_blocking(email, code, user_name="User"):
+    """Send account-verification code via Resend API"""
+    try:
+        RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+        if not RESEND_API_KEY:
+            print("✗ RESEND_API_KEY not set in environment variables")
+            return
+
+        html_body = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
+                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    <h2 style="color: #333; margin-bottom: 20px;">Verify Your Email</h2>
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">Hi {user_name},</p>
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
+                        Welcome to SkillChain! Use the code below to verify your email and activate your account:
+                    </p>
+                    <div style="background-color: #e85c00; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 30px 0; font-size: 28px; font-weight: bold; letter-spacing: 3px;">
+                        {code}
+                    </div>
+                    <p style="color: #555; font-size: 14px;"><strong>This code expires in 10 minutes.</strong></p>
+                    <p style="color: #555; font-size: 14px;">If you didn't create a SkillChain account, please ignore this email.</p>
+                    <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+                    <p style="color: #999; font-size: 12px; text-align: center;">
+                        SkillChain Team<br>
+                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #e85c00;">Visit SkillChain</a>
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+
+        response = req.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {RESEND_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "from": "SkillChain <onboarding@resend.dev>",
+                "to": email,
+                "subject": "Verify your SkillChain account",
+                "html": html_body
+            },
+            timeout=15
+        )
+
+        if response.status_code == 200:
+            print(f"✓ Verification email sent to {email}")
+        else:
+            print(f"✗ Resend API error: {response.status_code} | {response.text}")
+
+    except Exception as e:
+        print(f"✗ Failed to send verification email to {email}: {type(e).__name__}: {e}")
+
+
+def send_verification_email(email, code, user_name="User"):
+    """Send account verification email in background thread"""
+    thread = Thread(target=_send_verification_email_blocking, args=(email, code, user_name), daemon=False)
+    thread.start()
+    thread.join(timeout=15)
+    return True
+
 def squad_create_collection_account(job_id: int, amount: float, email: str) -> dict:
     """Create a collection account for escrow payment"""
     reference = f"job_{job_id}_{uuid.uuid4().hex[:8]}"

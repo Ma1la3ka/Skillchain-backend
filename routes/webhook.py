@@ -1,48 +1,38 @@
-"""Squad webhook and payment routes"""
-import json
-import hmac
-import hashlib
+"""Paystack webhook and payment routes"""
 import os
 from flask import Blueprint, request, jsonify
 from database_helper import get_db
-from config import SQUAD_KEY
+from paystack_service import verify_webhook_signature
 from utils import release_job_payment
 
 webhook_bp = Blueprint('webhook', __name__, url_prefix='/api')
 
 
-@webhook_bp.route("/squad/webhook", methods=["POST"])
-def api_squad_webhook():
-    """Handle Squad webhook for payment confirmation"""
+@webhook_bp.route("/paystack/webhook", methods=["POST"])
+def api_paystack_webhook():
+    """Handle Paystack webhook for payment confirmation"""
     raw_body = request.get_data()
-    squad_sig = request.headers.get("x-squad-encrypted-body", "")
-    computed_sig = hmac.new(
-        SQUAD_KEY.encode("utf-8"),
-        raw_body,
-        hashlib.sha512
-    ).hexdigest().upper()
+    signature = request.headers.get("x-paystack-signature", "")
 
-    if squad_sig.upper() != computed_sig:
-        print(f"[webhook] Signature mismatch. Got: {squad_sig[:20]}…")
+    if not verify_webhook_signature(raw_body, signature):
+        print("[webhook] Signature mismatch — rejecting.")
         return jsonify({"status": "signature_invalid"}), 200
 
     try:
-        payload = json.loads(raw_body)
+        payload = request.get_json(force=True)
     except Exception:
         return jsonify({"status": "bad_json"}), 200
 
-    print(f"[webhook] Received: {json.dumps(payload, indent=2)}")
+    event = payload.get("event", "")
+    print(f"[webhook] Received event: {event}")
 
-    event = payload.get("Event", payload.get("event", ""))
-
-    if event not in ("virtual_account_created_funded", "charge.success", "transfer.success"):
+    if event != "charge.success":
         return jsonify({"status": "ignored", "event": event}), 200
 
-    data = payload.get("Body", payload.get("data", {}))
-    reference = data.get("customer_identifier", data.get("reference", ""))
-    amount_kobo = data.get("amount", data.get("transaction_amount", 0))
+    data = payload.get("data", {})
+    reference = data.get("reference", "")
+    amount_kobo = data.get("amount", 0)
     amount_naira = float(amount_kobo) / 100 if amount_kobo else 0.0
-    transaction_ref = data.get("transaction_reference", data.get("Reference", ""))
 
     print(f"[webhook] reference={reference} amount=₦{amount_naira:.2f}")
 
@@ -72,8 +62,7 @@ def api_squad_webhook():
         if abs(amount_naira - expected_naira) > 1.0:
             print(f"[webhook] Amount mismatch. Expected ₦{expected_naira} got ₦{amount_naira}")
             cur.execute(
-                """UPDATE jobs SET escrow_amount_received = %s
-                   WHERE id = %s""",
+                "UPDATE jobs SET escrow_amount_received = %s WHERE id = %s",
                 (amount_naira, job["id"])
             )
             conn.commit()
@@ -85,9 +74,9 @@ def api_squad_webhook():
 
         cur.execute(
             """UPDATE jobs SET
-               escrow_paid             = 1,
-               escrow_paid_at          = NOW(),
-               escrow_amount_received  = %s
+               escrow_paid            = 1,
+               escrow_paid_at         = NOW(),
+               escrow_amount_received = %s
                WHERE id = %s""",
             (amount_naira, job["id"])
         )
@@ -107,7 +96,7 @@ def api_squad_webhook():
 
 @webhook_bp.route("/dev/simulate-payment", methods=["POST"])
 def api_simulate_payment():
-    """DEV ONLY: Simulate Squad webhook"""
+    """DEV ONLY: Simulate a successful escrow payment without calling Paystack."""
     if os.environ.get("FLASK_ENV") == "production":
         return jsonify({"error": "Not available in production"}), 403
 
@@ -141,9 +130,7 @@ def api_simulate_payment():
 
 @webhook_bp.route("/dev/force-release/<int:job_id>", methods=["POST"])
 def api_dev_force_release(job_id):
-    """DEV ONLY: Force the 24h auto-release logic to run for one job right now,
-    instead of waiting for the scheduler / real 24h deadline. Handy for testing
-    the client-review-timeout flow without sitting around for a day."""
+    """DEV ONLY: Force the 24h auto-release logic to run for one job right now."""
     if os.environ.get("FLASK_ENV") == "production":
         return jsonify({"error": "Not available in production"}), 403
 
