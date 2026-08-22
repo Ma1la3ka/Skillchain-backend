@@ -156,32 +156,49 @@ def release_job_payment(job, cur):
     return transfer_reference
 
 
-def _send_email_blocking(email, token, user_name="User"):
-    """Send password reset email via Resend API"""
+# ─────────────────────────────────────────────────────────────────────────────
+# RESEND EMAIL (verified domain: hamzlabs.com)
+# ─────────────────────────────────────────────────────────────────────────────
+
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+SENDER_EMAIL = "hello@hamzlabs.com"
+SENDER_NAME = "SkillChain"
+
+
+def _send_email_blocking(email, token, user_name="User", email_type="reset"):
+    """Send email via Resend API using verified hamzlabs.com domain"""
     try:
-        RESEND_API_KEY = os.getenv("RESEND_API_KEY")
         if not RESEND_API_KEY:
             print("✗ RESEND_API_KEY not set in environment variables")
-            return
+            return False
+
+        if email_type == "reset":
+            subject = "SkillChain - Password Reset Code"
+            heading = "Password Reset Request"
+            body_text = "We received a request to reset your SkillChain password. Use the code below to proceed:"
+            code_label = token
+        else:
+            subject = "Verify your SkillChain account"
+            heading = "Verify Your Email"
+            body_text = "Welcome to SkillChain! Use the code below to verify your email and activate your account:"
+            code_label = token
 
         html_body = f"""
         <html>
             <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
                 <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                    <h2 style="color: #333; margin-bottom: 20px;">Password Reset Request</h2>
+                    <h2 style="color: #333; margin-bottom: 20px;">{heading}</h2>
                     <p style="color: #555; font-size: 16px; line-height: 1.6;">Hi {user_name},</p>
-                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
-                        We received a request to reset your SkillChain password. Use the code below to proceed:
-                    </p>
-                    <div style="background-color: #e85c00; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 30px 0; font-size: 28px; font-weight: bold; letter-spacing: 3px;">
-                        {token}
+                    <p style="color: #555; font-size: 16px; line-height: 1.6;">{body_text}</p>
+                    <div style="background-color: #FF4D2E; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 30px 0; font-size: 28px; font-weight: bold; letter-spacing: 3px;">
+                        {code_label}
                     </div>
                     <p style="color: #555; font-size: 14px;"><strong>This code expires in 10 minutes.</strong></p>
                     <p style="color: #555; font-size: 14px;">If you didn't request this, please ignore this email.</p>
                     <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
                     <p style="color: #999; font-size: 12px; text-align: center;">
-                        SkillChain Team<br>
-                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #e85c00;">Visit SkillChain</a>
+                        SkillChain by Hamz Labs<br>
+                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #FF4D2E;">Visit SkillChain</a>
                     </p>
                 </div>
             </body>
@@ -195,91 +212,47 @@ def _send_email_blocking(email, token, user_name="User"):
                 "Content-Type": "application/json"
             },
             json={
-                "from": "SkillChain <onboarding@resend.dev>",
+                "from": f"{SENDER_NAME} <{SENDER_EMAIL}>",
                 "to": email,
-                "subject": "SkillChain - Password Reset Code",
+                "subject": subject,
                 "html": html_body
             },
             timeout=15
         )
 
-        if response.status_code == 200:
-            print(f"✓ Password reset email sent to {email}")
+        if response.status_code in (200, 202):
+            print(f"✓ Email sent to {email} (type: {email_type})")
+            return True
         else:
             print(f"✗ Resend API error: {response.status_code} | {response.text}")
+            return False
 
     except Exception as e:
         print(f"✗ Failed to send email to {email}: {type(e).__name__}: {e}")
+        return False
 
 
 def send_reset_email(email, token, user_name="User"):
     """Send password reset email in background thread"""
-    thread = Thread(target=_send_email_blocking, args=(email, token, user_name), daemon=False)
+    thread = Thread(
+        target=_send_email_blocking,
+        args=(email, token, user_name, "reset"),
+        daemon=False
+    )
     thread.start()
     thread.join(timeout=15)
-    print(f"[EMAIL] Thread completed for {email}")
+    print(f"[EMAIL] Reset thread completed for {email}")
     return True
-
-
-def _send_verification_email_blocking(email, code, user_name="User"):
-    """Send account-verification code via Resend API"""
-    try:
-        RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-        if not RESEND_API_KEY:
-            print("✗ RESEND_API_KEY not set in environment variables")
-            return
-
-        html_body = f"""
-        <html>
-            <body style="font-family: Arial, sans-serif; background-color: #f4f4f4; padding: 20px;">
-                <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
-                    <h2 style="color: #333; margin-bottom: 20px;">Verify Your Email</h2>
-                    <p style="color: #555; font-size: 16px; line-height: 1.6;">Hi {user_name},</p>
-                    <p style="color: #555; font-size: 16px; line-height: 1.6;">
-                        Welcome to SkillChain! Use the code below to verify your email and activate your account:
-                    </p>
-                    <div style="background-color: #e85c00; color: white; padding: 15px; border-radius: 5px; text-align: center; margin: 30px 0; font-size: 28px; font-weight: bold; letter-spacing: 3px;">
-                        {code}
-                    </div>
-                    <p style="color: #555; font-size: 14px;"><strong>This code expires in 10 minutes.</strong></p>
-                    <p style="color: #555; font-size: 14px;">If you didn't create a SkillChain account, please ignore this email.</p>
-                    <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
-                    <p style="color: #999; font-size: 12px; text-align: center;">
-                        SkillChain Team<br>
-                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #e85c00;">Visit SkillChain</a>
-                    </p>
-                </div>
-            </body>
-        </html>
-        """
-
-        response = req.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {RESEND_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "from": "SkillChain <onboarding@resend.dev>",
-                "to": email,
-                "subject": "Verify your SkillChain account",
-                "html": html_body
-            },
-            timeout=15
-        )
-
-        if response.status_code == 200:
-            print(f"✓ Verification email sent to {email}")
-        else:
-            print(f"✗ Resend API error: {response.status_code} | {response.text}")
-
-    except Exception as e:
-        print(f"✗ Failed to send verification email to {email}: {type(e).__name__}: {e}")
 
 
 def send_verification_email(email, code, user_name="User"):
     """Send account verification email in background thread"""
-    thread = Thread(target=_send_verification_email_blocking, args=(email, code, user_name), daemon=False)
+    thread = Thread(
+        target=_send_email_blocking,
+        args=(email, code, user_name, "verify"),
+        daemon=False
+    )
     thread.start()
     thread.join(timeout=15)
+    print(f"[EMAIL] Verify thread completed for {email}")
     return True
