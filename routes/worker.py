@@ -149,15 +149,16 @@ def api_worker_open_jobs():
     cur = conn.cursor(dictionary=True)
 
     sql = """SELECT j.*,
-                    c.name AS client_name
-             FROM jobs j
-             LEFT JOIN users c ON c.id = j.client_id
-             WHERE j.status = 'open'
-               AND j.worker_id IS NULL
-
-               AND j.client_id != %s"""
-    params = [user_id]
-
+                c.name AS client_name
+            FROM jobs j
+            LEFT JOIN users c ON c.id = j.client_id
+            WHERE j.status = 'open'
+            AND j.client_id != %s
+            AND (
+                (j.visibility = 'public' AND j.worker_id IS NULL)
+                OR (j.visibility = 'private' AND j.invited_worker_id = %s)
+            )"""
+    params = [user_id, user_id]
     if trade:
         sql += " AND j.trade = %s"
         params.append(trade)
@@ -307,6 +308,122 @@ def api_worker_bargain():
     finally:
         cur.close()
         conn.close()
+
+
+import re
+
+@worker_bp.route("/recommend")
+def api_recommend_workers():
+    client_id   = request.args.get("user_id", "").strip()
+    job_id      = request.args.get("job_id", "").strip()
+    trade       = request.args.get("trade", "").strip()
+    client_lat  = request.args.get("lat", type=float)
+    client_lng  = request.args.get("lng", type=float)
+    limit       = request.args.get("limit", 5, type=int)
+
+    if not client_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+
+    job_trade = trade
+    job_lat, job_lng = client_lat, client_lng
+    job_title, job_desc = "", ""
+    
+    if job_id:
+        cur.execute("SELECT title, description, trade, site_lat, site_lng FROM jobs WHERE id=%s AND client_id=%s", (job_id, client_id))
+        job = cur.fetchone()
+        if job:
+            job_trade = job_trade or job.get("trade")
+            job_title = job.get("title", "")
+            job_desc = job.get("description", "")
+            if job.get("site_lat") and job.get("site_lng"):
+                job_lat = float(job["site_lat"])
+                job_lng = float(job["site_lng"])
+
+    job_text = f"{job_title} {job_desc}".lower()
+    raw_words = set(re.findall(r'\b\w+\b', job_text))
+    stop_words = {'the','a','an','and','or','but','in','on','at','to','for','of','with','by','is','are','was','were','be','been','have','has','had','do','does','did','will','would','could','should','may','might','can','this','that','these','those','i','you','he','she','it','we','they','me','him','her','us','them','my','your','his','her','its','our','their','mine','yours','hers','ours','theirs','am','so','if','out','up','about','into','through','during','before','after','above','below','from','off','over','under','again','further','then','once','here','there','when','where','why','how','all','each','few','more','most','other','some','such','no','nor','not','only','own','same','than','too','very','just','now','get','need','help','work','job','done','good','great','nice','bad','worse','worst','better','best'}
+    job_keywords = {w for w in raw_words if len(w) > 2 and w not in stop_words}
+
+    sql = """SELECT id, name, trade, trust_score, jobs_completed,
+                    profile_photo_path, shop_lat, shop_lng, shop_address,
+                    last_seen_at
+             FROM users
+             WHERE (role='worker' OR active_role='worker')
+               AND id != %s"""
+    params = [client_id]
+
+    if job_trade:
+        sql += " AND trade = %s"
+        params.append(job_trade)
+
+    sql += " ORDER BY jobs_completed DESC LIMIT 50"
+    cur.execute(sql, params)
+    workers = cur.fetchall()
+
+    scored_workers = []
+    for w in workers:
+        wid = w["id"]
+
+        cur.execute(
+            """SELECT COUNT(*) as cnt FROM jobs 
+               WHERE worker_id=%s AND trade=%s AND status IN ('verified','paid')""",
+            (wid, job_trade)
+        )
+        same_trade_count = cur.fetchone()["cnt"] or 0
+
+        cur.execute("SELECT comment FROM reviews WHERE worker_id=%s", (wid,))
+        reviews = cur.fetchall()
+        
+        review_matches = 0
+        if reviews and job_keywords:
+            for r in reviews:
+                comment = (r["comment"] or "").lower()
+                comment_words = set(re.findall(r'\b\w+\b', comment))
+                review_matches += len(comment_words & job_keywords)
+
+        dist_km = None
+        if job_lat and w.get("shop_lat") and w.get("shop_lng"):
+            dist_km = haversine_distance(job_lat, job_lng, float(w["shop_lat"]), float(w["shop_lng"]))
+
+        score = 0
+        if job_trade and w["trade"] == job_trade:
+            score += 40
+
+        if dist_km is not None:
+            if dist_km < 1:   score += 30
+            elif dist_km < 3: score += 25
+            elif dist_km < 5: score += 20
+            elif dist_km < 10: score += 15
+            elif dist_km < 20: score += 10
+            else:             score += 5
+        else:
+            score += 10
+
+        trust = float(w.get("trust_score") or 3.5)
+        score += (trust / 5.0) * 20
+        score += min(20, same_trade_count * 4)
+        score += min(20, review_matches * 3)
+        score += min(10, (w.get("jobs_completed", 0) / 2))
+
+        w["match_score"] = round(score, 1)
+        w["distance_km"] = round(dist_km, 1) if dist_km is not None else None
+        w["same_trade_jobs"] = same_trade_count
+        w["review_matches"] = review_matches
+        w["trust_score"] = trust
+        scored_workers.append(w)
+
+    cur.close()
+    conn.close()
+    scored_workers.sort(key=lambda x: x["match_score"], reverse=True)
+
+    return jsonify({
+        "workers": scored_workers[:limit],
+        "based_on_trade": job_trade,
+        "based_on_keywords": list(job_keywords)[:10]
+    })
 
 
 @worker_bp.route("/open-jobs-social")

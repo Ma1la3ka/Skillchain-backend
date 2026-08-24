@@ -353,6 +353,57 @@ def api_client_jobs():
         cur.close()
         conn.close()
 
+@client_bp.route('/api/client/direct-hire', methods=['POST'])
+def direct_hire():
+    data = request.get_json() or {}
+    user_id = data.get('user_id')
+    worker_id = data.get('worker_id')
+
+    if not user_id:
+        return jsonify({'success': False, 'message': 'Missing user_id'}), 400
+
+    title = (data.get('title') or '').strip()
+    description = (data.get('description') or '').strip()
+    amount = data.get('amount')
+    site_address = (data.get('site_address') or '').strip()
+    trade = data.get('trade', 'Other')
+
+    if not title:
+        return jsonify({'success': False, 'message': 'Job title is required'}), 400
+    if not amount or float(amount) < 100:
+        return jsonify({'success': False, 'message': 'Minimum amount is ₦100'}), 400
+    if not site_address:
+        return jsonify({'success': False, 'message': 'Site address is required'}), 400
+
+    try:
+        # --- Use your existing Job model / insert pattern here ---
+        job = Job(
+            client_id=user_id,
+            title=title,
+            description=description,
+            amount=float(amount),
+            trade=trade,
+            site_address=site_address,
+            site_lat=data.get('site_lat'),
+            site_lng=data.get('site_lng'),
+            status='open',
+            visibility='private',
+            invited_worker_id=worker_id,
+            escrow_paid=False
+        )
+        db.session.add(job)
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'job_id': job.id,
+            'message': 'Private invitation created'
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'message': str(e)}), 500
+
 
 # ── Get Applicants ────────────────────────────────────────────────────────────
 @client_bp.route("/applicants")
