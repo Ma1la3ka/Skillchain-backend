@@ -351,60 +351,85 @@ def api_client_jobs():
         return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
-        conn.close()
+        conn.close()@client_bp.route("/direct-hire", methods=["POST"])
+@client_bp.route("/direct-hire", methods=["POST"])
+def api_direct_hire():
+    """Client invites a specific worker directly. Job stays 'open' and
+    private until the worker accepts — reuses job_applications the same
+    way a normal application does, just initiated by the client instead."""
+    data         = request.get_json(silent=True) or {}
+    user_id      = str(data.get("user_id", "")).strip()
+    worker_id    = str(data.get("worker_id", "")).strip()
+    title        = (data.get("title") or "").strip()
+    description  = (data.get("description") or "").strip()
+    amount       = data.get("amount")
+    site_address = (data.get("site_address") or "").strip()
+    trade        = data.get("trade", "Other")
+    site_lat     = data.get("site_lat")
+    site_lng     = data.get("site_lng")
 
-@client_bp.route('/api/client/direct-hire', methods=['POST'])
-def direct_hire():
-    data = request.get_json() or {}
-    user_id = data.get('user_id')
-    worker_id = data.get('worker_id')
-
-    if not user_id:
-        return jsonify({'success': False, 'message': 'Missing user_id'}), 400
-
-    title = (data.get('title') or '').strip()
-    description = (data.get('description') or '').strip()
-    amount = data.get('amount')
-    site_address = (data.get('site_address') or '').strip()
-    trade = data.get('trade', 'Other')
-
+    if not user_id or not worker_id:
+        return jsonify({"success": False, "message": "user_id and worker_id required."}), 400
+    if worker_id == user_id:
+        return jsonify({"success": False, "message": "You can't invite yourself."}), 403
     if not title:
-        return jsonify({'success': False, 'message': 'Job title is required'}), 400
-    if not amount or float(amount) < 100:
-        return jsonify({'success': False, 'message': 'Minimum amount is ₦100'}), 400
-    if not site_address:
-        return jsonify({'success': False, 'message': 'Site address is required'}), 400
-
+        return jsonify({"success": False, "message": "Job title is required."}), 400
     try:
-        # --- Use your existing Job model / insert pattern here ---
-        job = Job(
-            client_id=user_id,
-            title=title,
-            description=description,
-            amount=float(amount),
-            trade=trade,
-            site_address=site_address,
-            site_lat=data.get('site_lat'),
-            site_lng=data.get('site_lng'),
-            status='open',
-            visibility='private',
-            invited_worker_id=worker_id,
-            escrow_paid=False
+        amount = float(amount)
+        if amount < 100:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"success": False, "message": "Minimum amount is ₦100"}), 400
+    if not site_address:
+        return jsonify({"success": False, "message": "Site address is required."}), 400
+
+    fees = calculate_fees(amount)
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """INSERT INTO jobs
+               (client_id, title, description, trade,
+                site_address, site_lat, site_lng,
+                amount, platform_fee, client_pays, artisan_gets,
+                visibility, invited_worker_id, status, created_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'private',%s,'open', NOW())""",
+            (user_id, title, description, trade,
+             site_address, site_lat, site_lng,
+             fees["amount"], fees["platform_fee"],
+             fees["client_pays"], fees["artisan_gets"], worker_id)
         )
-        db.session.add(job)
-        db.session.commit()
+        job_id = cur.lastrowid
 
+        # Mirror it into job_applications, but flagged as client-initiated —
+        # the worker now needs to accept/decline it, same shape as a normal application.
+        cur.execute(
+            """INSERT INTO job_applications (job_id, worker_id, status, initiated_by, created_at)
+               VALUES (%s, %s, 'pending', 'client', NOW())""",
+            (job_id, worker_id)
+        )
+
+        conn.commit()
         return jsonify({
-            'success': True,
-            'job_id': job.id,
-            'message': 'Private invitation created'
+            "success": True,
+            "job_id": job_id,
+            "message": "Invitation sent — waiting for the artisan to accept.",
+            "fee_breakdown": {
+                "job_amount":   fees["amount"],
+                "your_fee":     fees["client_fee"],
+                "you_pay":      fees["client_pays"],
+                "artisan_gets": fees["artisan_gets"],
+            }
         })
-
     except Exception as e:
-        db.session.rollback()
-        return jsonify({'success': False, 'message': str(e)}), 500
-
-
+        conn.rollback()
+        print(f"[direct-hire error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+        
 # ── Get Applicants ────────────────────────────────────────────────────────────
 @client_bp.route("/applicants")
 def api_client_applicants():

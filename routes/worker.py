@@ -878,3 +878,55 @@ def api_set_pin():
     finally:
         cur.close()
         conn.close()
+
+@worker_bp.route("/respond-invitation", methods=["POST"])
+def api_worker_respond_invitation():
+    """Worker accepts or declines a client-initiated direct-hire invite."""
+    data      = request.get_json(silent=True) or {}
+    job_id    = data.get("job_id")
+    user_id   = str(data.get("user_id", "")).strip()
+    action    = data.get("action", "").strip()  # 'accept' or 'decline'
+
+    if not job_id or not user_id or action not in ("accept", "decline"):
+        return jsonify({"success": False, "message": "job_id, user_id and action (accept/decline) required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT ja.id FROM job_applications ja
+               JOIN jobs j ON j.id = ja.job_id
+               WHERE ja.job_id=%s AND ja.worker_id=%s AND j.status='open'
+                 AND ja.status='pending' AND ja.initiated_by='client'""",
+            (job_id, user_id)
+        )
+        invite = cur.fetchone()
+        if not invite:
+            return jsonify({"success": False, "message": "Invitation not found or already resolved."}), 404
+
+        if action == "accept":
+            cur.execute(
+                "UPDATE jobs SET worker_id=%s, status='assigned', assigned_at=NOW() WHERE id=%s",
+                (user_id, job_id)
+            )
+            cur.execute(
+                "UPDATE job_applications SET status='accepted' WHERE job_id=%s AND worker_id=%s",
+                (job_id, user_id)
+            )
+        else:
+            cur.execute(
+                "UPDATE job_applications SET status='rejected' WHERE job_id=%s AND worker_id=%s",
+                (job_id, user_id)
+            )
+            # invite declined — the job has no worker, client can delete it via
+            # the existing delete-job route (it's still 'open') or invite someone else
+
+        conn.commit()
+        return jsonify({"success": True, "action": action})
+    except Exception as e:
+        conn.rollback()
+        print(f"[respond-invitation error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
