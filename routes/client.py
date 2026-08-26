@@ -351,7 +351,8 @@ def api_client_jobs():
         return jsonify({"error": str(e)}), 500
     finally:
         cur.close()
-        conn.close()@client_bp.route("/direct-hire", methods=["POST"])
+        conn.close()
+        
 @client_bp.route("/direct-hire", methods=["POST"])
 def api_direct_hire():
     """Client invites a specific worker directly. Job stays 'open' and
