@@ -329,7 +329,9 @@ def api_client_jobs():
                       u.name       AS worker_name,
                       u.trade      AS worker_trade,
                       u.trust_score AS worker_trust,
-                      u.phone      AS worker_phone
+                      u.phone      AS worker_phone,
+                      (SELECT COUNT(*) FROM job_applications ja
+                       WHERE ja.job_id = j.id AND ja.status = 'pending') AS applicant_count
                FROM jobs j
                LEFT JOIN users u ON u.id = j.worker_id
                WHERE j.client_id = %s
@@ -338,13 +340,14 @@ def api_client_jobs():
         )
         jobs = cur.fetchall()
         for j in jobs:
-            j["amount"]       = float(j["amount"]       or 0)
-            j["platform_fee"] = float(j["platform_fee"] or 0)
-            j["client_pays"]  = float(j["client_pays"]  or 0)
-            j["artisan_gets"] = float(j["artisan_gets"] or 0)
-            j["worker_trust"] = float(j["worker_trust"] or 0) if j["worker_trust"] else None
-            j["created_at"]   = str(j["created_at"])
-            j["paid_at"]      = str(j["paid_at"]) if j.get("paid_at") else None
+            j["amount"]          = float(j["amount"]       or 0)
+            j["platform_fee"]    = float(j["platform_fee"] or 0)
+            j["client_pays"]     = float(j["client_pays"]  or 0)
+            j["artisan_gets"]    = float(j["artisan_gets"] or 0)
+            j["applicant_count"] = int(j["applicant_count"] or 0)
+            j["worker_trust"]    = float(j["worker_trust"] or 0) if j["worker_trust"] else None
+            j["created_at"]      = str(j["created_at"])
+            j["paid_at"]         = str(j["paid_at"]) if j.get("paid_at") else None
         return jsonify({"jobs": jobs})
     except Exception as e:
         print(f"[client-jobs error] {e}")
@@ -806,7 +809,13 @@ def api_respond_bargain():
 
 @client_bp.route("/review-worker", methods=["POST"])
 def api_review_worker():
-    """Client approves or declines a worker's application to a job"""
+    """Client approves or declines a worker's application to a job.
+
+    On assign: the chosen worker is notified, and every other pending
+    applicant on this job is auto-rejected AND notified via chat so they
+    aren't left wondering what happened.
+    On decline: only that one applicant is rejected and notified.
+    """
     data      = request.get_json(silent=True) or {}
     job_id    = data.get("job_id")
     worker_id = str(data.get("worker_id", "")).strip()
@@ -829,6 +838,11 @@ def api_review_worker():
         if not app_row:
             return jsonify({"success": False, "message": "Application not found or already resolved."}), 404
 
+        # Job title used for both branches' notification text
+        cur.execute("SELECT title FROM jobs WHERE id=%s", (job_id,))
+        job_row   = cur.fetchone()
+        job_title = job_row["title"] if job_row else "your job"
+
         if action == "assign":
             if worker_id == user_id:
                 return jsonify({"success": False, "message": "You can't assign yourself to your own job."}), 403
@@ -839,6 +853,14 @@ def api_review_worker():
                 return jsonify({"success": False, "message": "Job is no longer open."}), 409
 
             work_location_type = app_row.get("requested_location") or "client_site"
+
+            # Grab the other pending applicants BEFORE they get rejected,
+            # so we can notify each of them below.
+            cur.execute(
+                "SELECT worker_id FROM job_applications WHERE job_id=%s AND worker_id != %s AND status='pending'",
+                (job_id, worker_id)
+            )
+            other_applicants = [row["worker_id"] for row in cur.fetchall()]
 
             cur.execute(
                 """UPDATE jobs SET worker_id=%s, status='assigned', assigned_at=NOW(),
@@ -853,10 +875,36 @@ def api_review_worker():
                 "UPDATE job_applications SET status='accepted' WHERE job_id=%s AND worker_id=%s",
                 (job_id, worker_id)
             )
+
+            # ── Notify the assigned worker ──
+            assign_msg = f"🎉 You've been assigned to \"{job_title}\"! You can now proceed with the job."
+            cur.execute(
+                """INSERT INTO messages (job_id, sender_id, recipient_id, body, content, created_at)
+                   VALUES (%s, %s, %s, %s, %s, NOW())""",
+                (job_id, user_id, worker_id, assign_msg, assign_msg)
+            )
+
+            # ── Notify every other applicant that they were not chosen ──
+            decline_msg = f"Thanks for applying to \"{job_title}\" — the client has assigned someone else this time."
+            for other_id in other_applicants:
+                cur.execute(
+                    """INSERT INTO messages (job_id, sender_id, recipient_id, body, content, created_at)
+                       VALUES (%s, %s, %s, %s, %s, NOW())""",
+                    (job_id, user_id, other_id, decline_msg, decline_msg)
+                )
+
         else:  # decline
             cur.execute(
                 "UPDATE job_applications SET status='rejected' WHERE job_id=%s AND worker_id=%s",
                 (job_id, worker_id)
+            )
+
+            # ── Notify the declined applicant ──
+            decline_msg = f"Thanks for applying to \"{job_title}\" — the client has decided to go with someone else this time."
+            cur.execute(
+                """INSERT INTO messages (job_id, sender_id, recipient_id, body, content, created_at)
+                   VALUES (%s, %s, %s, %s, %s, NOW())""",
+                (job_id, user_id, worker_id, decline_msg, decline_msg)
             )
 
         conn.commit()
