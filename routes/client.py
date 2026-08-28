@@ -936,7 +936,7 @@ def api_review_job():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status IN ()'verified','pending_verification')",
+            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status IN ('verified','pending_verification')",
             (job_id, user_id)
         )
         job = cur.fetchone()
