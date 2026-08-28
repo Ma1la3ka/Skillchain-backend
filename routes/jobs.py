@@ -4,7 +4,6 @@ from database_helper import get_db
 
 jobs_bp = Blueprint('jobs', __name__, url_prefix='/api/job')
 
-
 @jobs_bp.route("/payment-details")
 def api_job_payment_details():
     """Get payment details for a job"""
@@ -16,7 +15,7 @@ def api_job_payment_details():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     cur.execute(
-        """SELECT id, title, amount,
+        """SELECT id, title, amount, client_pays, artisan_gets, platform_fee,
                   collection_account_number, collection_bank_name, collection_bank_code,
                   escrow_paid, escrow_paid_at, escrow_amount_received,
                   status, worker_id
@@ -30,13 +29,14 @@ def api_job_payment_details():
     if not job:
         return jsonify({"error": "Job not found"}), 404
 
-    job["amount"] = float(job["amount"] or 0)
+    job["amount"]       = float(job["amount"] or 0)
+    job["client_pays"]  = float(job["client_pays"] or job["amount"])
+    job["artisan_gets"] = float(job["artisan_gets"] or job["amount"])
     job["escrow_amount_received"] = float(job["escrow_amount_received"] or 0) if job["escrow_amount_received"] else None
     job["escrow_paid"] = bool(job["escrow_paid"])
     job["escrow_paid_at"] = str(job["escrow_paid_at"]) if job["escrow_paid_at"] else None
 
     return jsonify(job)
-
 
 @jobs_bp.route("/escrow-status")
 def api_escrow_status():
