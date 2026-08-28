@@ -108,10 +108,12 @@ def api_simulate_payment():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT id, amount, escrow_reference FROM jobs WHERE id = %s", (job_id,))
+        cur.execute("SELECT id, amount, client_pays, escrow_reference FROM jobs WHERE id = %s", (job_id,))
         job = cur.fetchone()
         if not job:
             return jsonify({"error": "Job not found"}), 404
+
+        pay_amount = float(job["client_pays"] or job["amount"])
 
         cur.execute(
             """UPDATE jobs SET
@@ -119,10 +121,10 @@ def api_simulate_payment():
                escrow_paid_at         = NOW(),
                escrow_amount_received = %s
                WHERE id = %s""",
-            (float(job["amount"]), job_id)
+            (pay_amount, job_id)
         )
         conn.commit()
-        return jsonify({"success": True, "message": f"Job {job_id} escrow simulated as paid ₦{job['amount']}"})
+        return jsonify({"success": True, "message": f"Job {job_id} escrow simulated as paid ₦{pay_amount:,.2f}"})
     finally:
         cur.close()
         conn.close()
