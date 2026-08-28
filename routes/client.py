@@ -524,7 +524,7 @@ def api_client_pending_review_jobs():
             """SELECT j.*, u.name AS worker_name
                FROM jobs j
                LEFT JOIN users u ON u.id = j.worker_id
-               WHERE j.client_id = %s AND j.status = 'verified'
+               WHERE j.client_id = %s AND j.status IN ('verified','pending_verification')
                ORDER BY j.verified_at DESC""",
             (user_id,)
         )
@@ -672,7 +672,7 @@ def api_dispute_job():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status='verified'",
+            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status IN ('verified','pending_verification')",
             (job_id, user_id)
         )
         job = cur.fetchone()
@@ -936,7 +936,7 @@ def api_review_job():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute(
-            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status='verified'",
+            "SELECT * FROM jobs WHERE id=%s AND client_id=%s AND status IN ()'verified','pending_verification')",
             (job_id, user_id)
         )
         job = cur.fetchone()
