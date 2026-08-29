@@ -6,6 +6,8 @@ import uuid
 import os
 import cloudinary
 import cloudinary.uploader
+from datetime import datetime, timedelta
+import random
 
 worker_bp = Blueprint('worker', __name__, url_prefix='/api/worker')
 
@@ -536,16 +538,49 @@ def api_worker_withdraw():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT name, withdrawal_pin_hash FROM users WHERE id = %s", (user_id,))
+        cur.execute(
+            "SELECT name, withdrawal_pin_hash, pin_failed_attempts, pin_locked_until FROM users WHERE id = %s",
+            (user_id,)
+        )
         worker = cur.fetchone()
         if not worker:
             return jsonify({"success": False, "message": "Worker not found."}), 404
         if not worker["withdrawal_pin_hash"]:
             return jsonify({"success": False, "message": "Set a withdrawal PIN first.", "needs_pin_setup": True}), 403
-        if not check_password_hash(worker["withdrawal_pin_hash"], pin):
-            return jsonify({"success": False, "message": "Incorrect withdrawal PIN."}), 403
 
-        # ...rest of the function unchanged from here...
+        # ── Lockout check ──
+        if worker["pin_locked_until"] and datetime.now() < worker["pin_locked_until"]:
+            remaining = int((worker["pin_locked_until"] - datetime.now()).total_seconds() / 60) + 1
+            return jsonify({
+                "success": False,
+                "locked": True,
+                "message": f"Too many wrong PIN attempts. Try again in {remaining} minute(s), or reset your PIN."
+            }), 403
+
+        # ── PIN check ──
+        if not check_password_hash(worker["withdrawal_pin_hash"], pin):
+            attempts = (worker["pin_failed_attempts"] or 0) + 1
+            if attempts >= 3:
+                cur.execute(
+                    "UPDATE users SET pin_failed_attempts=0, pin_locked_until=%s WHERE id=%s",
+                    (datetime.now() + timedelta(hours=1), user_id)
+                )
+                conn.commit()
+                return jsonify({
+                    "success": False, "locked": True,
+                    "message": "Too many wrong attempts. Withdrawals are locked for 1 hour."
+                }), 403
+            else:
+                cur.execute("UPDATE users SET pin_failed_attempts=%s WHERE id=%s", (attempts, user_id))
+                conn.commit()
+                return jsonify({
+                    "success": False,
+                    "message": f"Incorrect PIN. {3 - attempts} attempt(s) left before a 1-hour lock."
+                }), 403
+
+        # ── Correct PIN — reset counter ──
+        cur.execute("UPDATE users SET pin_failed_attempts=0, pin_locked_until=NULL WHERE id=%s", (user_id,))
+        conn.commit()
 
         cur.execute(
             "UPDATE users SET bank_code = %s, bank_account_no = %s WHERE id = %s",
@@ -878,6 +913,78 @@ def api_set_pin():
     finally:
         cur.close()
         conn.close()
+
+@worker_bp.route("/forgot-pin", methods=["POST"])
+def api_forgot_pin():
+    data  = request.get_json(silent=True) or {}
+    email = data.get("email", "").strip().lower()
+    if not email:
+        return jsonify({"success": False, "message": "Email is required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT id, name FROM users WHERE email = %s", (email,))
+        user = cur.fetchone()
+        if not user:
+            return jsonify({"success": True, "message": "If that email exists, a reset code has been sent."})
+
+        token  = str(random.randint(100000, 999999))
+        expiry = datetime.now() + timedelta(minutes=10)
+        cur.execute(
+            "INSERT INTO pin_reset_tokens (user_id, token, expires_at) VALUES (%s,%s,%s)",
+            (user["id"], token, expiry)
+        )
+        conn.commit()
+        send_pin_reset_email(email, token, user.get("name", "User"))
+        return jsonify({"success": True, "message": "If that email exists, a reset code has been sent."})
+    except Exception as e:
+        print(f"[forgot-pin error] {e}")
+        return jsonify({"success": False, "message": "Server error."}), 500
+    finally:
+        cur.close(); conn.close()
+
+
+@worker_bp.route("/reset-pin", methods=["POST"])
+def api_reset_pin():
+    data    = request.get_json(silent=True) or {}
+    email   = data.get("email", "").strip().lower()
+    token   = data.get("token", "").strip()
+    new_pin = str(data.get("new_pin", "")).strip()
+
+    if not all([email, token, new_pin]):
+        return jsonify({"success": False, "message": "Invalid request."}), 400
+    if not new_pin.isdigit() or not (4 <= len(new_pin) <= 6):
+        return jsonify({"success": False, "message": "PIN must be 4–6 digits."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT prt.* FROM pin_reset_tokens prt
+               JOIN users u ON u.id = prt.user_id
+               WHERE u.email=%s AND prt.token=%s AND prt.used=0""",
+            (email, token)
+        )
+        record = cur.fetchone()
+        if not record or datetime.now() > record["expires_at"]:
+            return jsonify({"success": False, "message": "Token expired or invalid."}), 400
+
+        new_hash = generate_password_hash(new_pin)
+        cur.execute(
+            """UPDATE users SET withdrawal_pin_hash=%s, pin_failed_attempts=0, pin_locked_until=NULL
+               WHERE id=%s""",
+            (new_hash, record["user_id"])
+        )
+        cur.execute("UPDATE pin_reset_tokens SET used=1 WHERE id=%s", (record["id"],))
+        conn.commit()
+        return jsonify({"success": True, "message": "PIN reset. You can now withdraw again."})
+    except Exception as e:
+        conn.rollback()
+        print(f"[reset-pin error] {e}")
+        return jsonify({"success": False, "message": "Server error."}), 500
+    finally:
+        cur.close(); conn.close()
 
 @worker_bp.route("/respond-invitation", methods=["POST"])
 def api_worker_respond_invitation():

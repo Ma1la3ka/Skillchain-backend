@@ -177,11 +177,19 @@ def _send_email_blocking(email, token, user_name="User", email_type="reset"):
             heading = "Password Reset Request"
             body_text = "We received a request to reset your SkillChain password. Use the code below to proceed:"
             code_label = token
+
+        elif email_type == "pin_reset":          # ← ADD THIS
+            subject = "SkillChain - Withdrawal PIN Reset Code"
+            heading = "Withdrawal PIN Reset"
+            body_text = "We received a request to reset your SkillChain withdrawal PIN. Use the code below to proceed:"
+            code_label = token
+
         else:
             subject = "Verify your SkillChain account"
             heading = "Verify Your Email"
             body_text = "Welcome to SkillChain! Use the code below to verify your email and activate your account:"
             code_label = token
+
 
         html_body = f"""
         <html>
@@ -243,6 +251,20 @@ def send_reset_email(email, token, user_name="User"):
     thread.join(timeout=15)
     print(f"[EMAIL] Reset thread completed for {email}")
     return True
+
+def send_pin_reset_email(email, token, user_name="User"):
+    """Send PIN reset email in background thread"""  
+    thread = Thread(
+        target=_send_email_blocking,
+        args=(email, token, user_name, "pin_reset"),
+        daemon=False
+    )
+    thread.start()
+    thread.join(timeout=15)
+    print(f"[EMAIL] PIN reset thread completed for {email}") 
+    return True
+
+
 
 
 def send_verification_email(email, code, user_name="User"):

@@ -636,7 +636,8 @@ def api_approve_job():
         cur.execute(
             """UPDATE users
                SET escrow_balance = escrow_balance + %s,
-                   total_earned   = total_earned   + %s
+                   total_earned   = total_earned   + %s,
+                   jobs_completed  = jobs_completed + 1
                WHERE id = %s""",
             (artisan_gets, artisan_gets, job["worker_id"])
         )
@@ -950,6 +951,7 @@ def api_review_job():
             cur.execute(
                 """UPDATE users SET escrow_balance = escrow_balance + %s,
                    total_earned = total_earned + %s WHERE id=%s""",
+                   jobs_completed  = jobs_completed + 1
                 (artisan_gets, artisan_gets, job["worker_id"])
             )
             message = "Payment released to the artisan."
@@ -1008,6 +1010,15 @@ def api_rate_worker():
         cur.execute(
             "UPDATE jobs SET client_rating=%s, client_rating_comment=%s WHERE id=%s",
             (rating, comment, job_id)
+        )
+        cur.execute(
+            "SELECT AVG(client_rating) AS avg_r FROM jobs WHERE worker_id=%s AND client_rating IS NOT NULL",
+            (job["worker_id"],)
+        )
+        avg_rating = cur.fetchone()["avg_r"] or 0
+        cur.execute(
+            "UPDATE users SET trust_score=%s WHERE id=%s",
+            (round(float(avg_rating), 2), job["worker_id"])
         )
         conn.commit()
         return jsonify({"success": True, "message": "Rating saved."})
