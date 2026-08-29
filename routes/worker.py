@@ -591,8 +591,8 @@ def api_worker_withdraw():
         reference = f"withdraw_{user_id}_{uuid.uuid4().hex[:8]}"
 
         cur.execute(
-            "UPDATE users SET total_withdrawn = COALESCE(total_withdrawn, 0) + %s WHERE id = %s",
-            (amount, user_id)
+            "UPDATE users SET total_withdrawn = COALESCE(total_withdrawn, 0) + %s, escrow_balance = GREATEST(0, escrow_balance - %s) WHERE id = %s",
+            (amount, amount, user_id)
         )
         conn.commit()
 
