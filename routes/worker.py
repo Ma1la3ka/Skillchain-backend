@@ -353,14 +353,14 @@ def api_recommend_workers():
     stop_words = {'the','a','an','and','or','but','in','on','at','to','for','of','with','by','is','are','was','were','be','been','have','has','had','do','does','did','will','would','could','should','may','might','can','this','that','these','those','i','you','he','she','it','we','they','me','him','her','us','them','my','your','his','her','its','our','their','mine','yours','hers','ours','theirs','am','so','if','out','up','about','into','through','during','before','after','above','below','from','off','over','under','again','further','then','once','here','there','when','where','why','how','all','each','few','more','most','other','some','such','no','nor','not','only','own','same','than','too','very','just','now','get','need','help','work','job','done','good','great','nice','bad','worse','worst','better','best'}
     job_keywords = {w for w in raw_words if len(w) > 2 and w not in stop_words}
 
-        sql = """SELECT id, name, trade, trust_score,
-                    (SELECT COUNT(*) FROM jobs j2 
-                     WHERE j2.worker_id = users.id AND j2.status IN ('verified','paid')) AS jobs_completed,
-                    profile_photo_path, shop_lat, shop_lng, shop_address,
-                    last_seen_at
-             FROM users
-             WHERE (role='worker' OR active_role='worker')
-               AND id != %s"""
+    sql = """SELECT id, name, trade, trust_score,
+                (SELECT COUNT(*) FROM jobs j2 
+                 WHERE j2.worker_id = users.id AND j2.status IN ('verified','paid')) AS jobs_completed,
+                profile_photo_path, shop_lat, shop_lng, shop_address,
+                last_seen_at
+         FROM users
+         WHERE (role='worker' OR active_role='worker')
+           AND id != %s"""
     params = [client_id]
 
     if job_trade:
