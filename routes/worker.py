@@ -60,13 +60,17 @@ def api_worker_profile():
     cur = conn.cursor(dictionary=True)
 
     cur.execute(
-    """SELECT id, name, email, role, phone, trade,
-              trust_score, jobs_completed,
-              squad_account_number, squad_bank_name, squad_customer_id,
-              total_withdrawn, bio, top_skills, profile_photo_path,
-              escrow_balance, bank_account_no, bank_code, bank_name,
-              bank_account_name, shop_lat, shop_lng, shop_address
-       FROM users WHERE id = %s AND (role = 'worker' OR active_role = 'worker')""",
+    """SELECT 
+        u.id, u.name, u.email, u.role, u.phone, u.trade,
+        u.trust_score,
+        (SELECT COUNT(*) FROM jobs j2 
+         WHERE j2.worker_id = u.id AND j2.status IN ('verified','paid')) AS jobs_completed,
+        u.squad_account_number, u.squad_bank_name, u.squad_customer_id,
+        u.total_withdrawn, u.bio, u.top_skills, u.profile_photo_path,
+        u.escrow_balance, u.bank_account_no, u.bank_code, u.bank_name,
+        u.bank_account_name, u.shop_lat, u.shop_lng, u.shop_address
+       FROM users u
+       WHERE u.id = %s AND (u.role = 'worker' OR u.active_role = 'worker')""",
     (user_id,)
 )
     user = cur.fetchone()
@@ -349,7 +353,9 @@ def api_recommend_workers():
     stop_words = {'the','a','an','and','or','but','in','on','at','to','for','of','with','by','is','are','was','were','be','been','have','has','had','do','does','did','will','would','could','should','may','might','can','this','that','these','those','i','you','he','she','it','we','they','me','him','her','us','them','my','your','his','her','its','our','their','mine','yours','hers','ours','theirs','am','so','if','out','up','about','into','through','during','before','after','above','below','from','off','over','under','again','further','then','once','here','there','when','where','why','how','all','each','few','more','most','other','some','such','no','nor','not','only','own','same','than','too','very','just','now','get','need','help','work','job','done','good','great','nice','bad','worse','worst','better','best'}
     job_keywords = {w for w in raw_words if len(w) > 2 and w not in stop_words}
 
-    sql = """SELECT id, name, trade, trust_score, jobs_completed,
+        sql = """SELECT id, name, trade, trust_score,
+                    (SELECT COUNT(*) FROM jobs j2 
+                     WHERE j2.worker_id = users.id AND j2.status IN ('verified','paid')) AS jobs_completed,
                     profile_photo_path, shop_lat, shop_lng, shop_address,
                     last_seen_at
              FROM users
@@ -661,10 +667,14 @@ def api_worker_public_profile():
     cur  = conn.cursor(dictionary=True)
     try:
         cur.execute("""
-            SELECT id, name, trade, trust_score, jobs_completed,
-                   profile_photo_path, top_skills, bio, phone,
-                   last_seen_at
-            FROM users WHERE id = %s AND (role = 'worker' OR active_role = 'worker')
+            SELECT 
+                u.id, u.name, u.trade, u.trust_score,
+                (SELECT COUNT(*) FROM jobs j2 
+                 WHERE j2.worker_id = u.id AND j2.status IN ('verified','paid')) AS jobs_completed,
+                u.profile_photo_path, u.top_skills, u.bio, u.phone,
+                u.last_seen_at
+            FROM users u
+            WHERE u.id = %s AND (u.role = 'worker' OR u.active_role = 'worker')
         """, (worker_id,))
         worker = cur.fetchone()
         if not worker:
