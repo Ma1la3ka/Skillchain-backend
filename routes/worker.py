@@ -96,6 +96,7 @@ def api_worker_profile():
     conn.close()
 
     user["trust_score"] = float(user["trust_score"] or 0)
+    user["cert_tier"] = compute_cert_tier(user["jobs_completed"], user["trust_score"])
     user["escrow_balance"] = float(user["escrow_balance"] or 0)
     user["shop_lat"] = float(user["shop_lat"]) if user["shop_lat"] else None
     user["shop_lng"] = float(user["shop_lng"]) if user["shop_lng"] else None
@@ -107,6 +108,15 @@ def api_worker_profile():
 
     user["verification_logs"] = logs
     return jsonify(user)
+
+def compute_cert_tier(jobs_completed, trust_score):
+    jobs = jobs_completed or 0
+    trust = float(trust_score or 0)
+    if jobs >= 20 and trust >= 4:
+        return "gold"
+    if jobs >= 5 and trust >= 3:
+        return "silver"
+    return "bronze"
 
 @worker_bp.route("/jobs")
 def api_worker_jobs():
@@ -663,6 +673,7 @@ def api_worker_public_profile():
     if not worker_id:
         return jsonify({"error": "worker_id required"}), 400
 
+
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
@@ -672,13 +683,15 @@ def api_worker_public_profile():
                 (SELECT COUNT(*) FROM jobs j2 
                  WHERE j2.worker_id = u.id AND j2.status IN ('verified','paid')) AS jobs_completed,
                 u.profile_photo_path, u.top_skills, u.bio, u.phone,
-                u.last_seen_at
+                u.last_seen_at, u.shop_lat, u.shop_lng, u.shop_address
             FROM users u
             WHERE u.id = %s AND (u.role = 'worker' OR u.active_role = 'worker')
         """, (worker_id,))
         worker = cur.fetchone()
         if not worker:
             return jsonify({"error": "Worker not found"}), 404
+        worker["shop_lat"] = float(worker["shop_lat"]) if worker["shop_lat"] else None
+        worker["shop_lng"] = float(worker["shop_lng"]) if worker["shop_lng"] else None
 
         online = False
         if worker["last_seen_at"]:
@@ -747,6 +760,7 @@ def api_worker_public_profile():
             "media":            media,
             "verification_logs": ver_logs,
             "trust_score":      float(worker["trust_score"] or 0),
+            "cert_tier": compute_cert_tier(worker.get("jobs_completed"), worker["trust_score"]),
         })
 
     except Exception as e:
