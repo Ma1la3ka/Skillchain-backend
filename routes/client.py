@@ -1067,6 +1067,59 @@ def api_delete_job():
         cur.close()
         conn.close()
 
+@client_bp.route("/retry-payment/<int:job_id>", methods=["POST"])
+def api_retry_payment(job_id):
+    """Regenerate a Paystack checkout link for a job whose payment account
+    failed to generate the first time (post-job succeeded, Paystack call failed)."""
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT j.id, j.client_pays, u.email
+               FROM jobs j JOIN users u ON u.id = j.client_id
+               WHERE j.id = %s""",
+            (job_id,)
+        )
+        job = cur.fetchone()
+        if not job:
+            return jsonify({"success": False, "message": "Job not found."}), 404
+        if not job["email"]:
+            return jsonify({"success": False, "message": "Client email missing."}), 400
+
+        from utils import paystack_create_collection_account
+        collection = paystack_create_collection_account(job_id, float(job["client_pays"]), job["email"])
+
+        if not collection:
+            return jsonify({"success": False, "message": "Could not generate payment link. Try again."}), 502
+
+        cur.execute(
+            """UPDATE jobs SET
+               collection_account_number = %s,
+               collection_bank_name      = %s,
+               collection_bank_code      = %s,
+               escrow_reference          = %s
+               WHERE id = %s""",
+            (collection.get("account_number"), collection.get("bank_name"),
+             collection.get("bank_code"), collection.get("reference"), job_id)
+        )
+        conn.commit()
+
+        return jsonify({
+            "success": True,
+            "data": {
+                "account_number": collection.get("account_number"),
+                "bank_name":      collection.get("bank_name"),
+                "checkout_url":   collection.get("checkout_url")
+            }
+        })
+    except Exception as e:
+        conn.rollback()
+        print(f"[retry-payment error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
 # ── Fee Preview ───────────────────────────────────────────────────────────────
 @client_bp.route("/fee-preview")
 def api_fee_preview():

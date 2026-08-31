@@ -87,7 +87,11 @@ def api_workers_search():
         sql += " AND (u.name LIKE %s OR u.trade LIKE %s)"
         params += [f"%{q}%", f"%{q}%"]
 
-    sql += " GROUP BY u.id ORDER BY u.trust_score DESC, u.jobs_completed DESC LIMIT 100"
+    sql += """
+        GROUP BY u.id, u.name, u.trade, u.trust_score, u.phone, jc.cnt
+        ORDER BY u.trust_score DESC, jobs_completed DESC
+        LIMIT 100
+    """
 
     cur.execute(sql, params)
     workers = cur.fetchall()
