@@ -8,7 +8,7 @@ import cloudinary
 import cloudinary.uploader
 from datetime import datetime, timedelta
 import random
-
+from utils import send_pin_reset_email
 worker_bp = Blueprint('worker', __name__, url_prefix='/api/worker')
 
 # UPDATE the upload-avatar route:
@@ -65,6 +65,7 @@ def api_worker_profile():
         u.trust_score,
         (SELECT COUNT(*) FROM jobs j2 
          WHERE j2.worker_id = u.id AND j2.status IN ('verified','paid')) AS jobs_completed,
+        u.quick_gigs_completed,
         u.squad_account_number, u.squad_bank_name, u.squad_customer_id,
         u.total_withdrawn, u.bio, u.top_skills, u.profile_photo_path,
         u.escrow_balance, u.bank_account_no, u.bank_code, u.bank_name,
@@ -100,6 +101,7 @@ def api_worker_profile():
     user["escrow_balance"] = float(user["escrow_balance"] or 0)
     user["shop_lat"] = float(user["shop_lat"]) if user["shop_lat"] else None
     user["shop_lng"] = float(user["shop_lng"]) if user["shop_lng"] else None
+    user["quick_gigs_completed"] = int(user.get("quick_gigs_completed") or 0)
 
     if user.get("top_skills"):
         user["top_skills"] = [s.strip() for s in user["top_skills"].split(",") if s.strip()]
@@ -154,9 +156,10 @@ def api_worker_jobs():
 @worker_bp.route("/open-jobs")
 def api_worker_open_jobs():
     """Get all open jobs workers can apply for"""
-    user_id = request.args.get("user_id", "").strip()
-    q = request.args.get("q", "").strip()
-    trade = request.args.get("trade", "").strip()
+    user_id  = request.args.get("user_id", "").strip()
+    q        = request.args.get("q", "").strip()
+    trade    = request.args.get("trade", "").strip()
+    job_type = request.args.get("job_type", "").strip()
 
     if not user_id:
         return jsonify({"error": "user_id required"}), 400
@@ -178,6 +181,10 @@ def api_worker_open_jobs():
     if trade:
         sql += " AND j.trade = %s"
         params.append(trade)
+
+    if job_type in ("skilled", "quick_gig"):
+        sql += " AND j.job_type = %s"
+        params.append(job_type)
 
     if q:
         sql += " AND (j.title LIKE %s OR j.description LIKE %s)"

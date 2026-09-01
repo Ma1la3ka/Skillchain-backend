@@ -634,16 +634,27 @@ def api_approve_job():
             (job_id,)
         )
 
-        # Credit artisan's internal balance — no Squad/Paystack call here.
+                # Credit artisan's internal balance — no Squad/Paystack call here.
         # Money moves to bank when artisan clicks Withdraw.
-        cur.execute(
-            """UPDATE users
-               SET escrow_balance = escrow_balance + %s,
-                   total_earned   = total_earned   + %s,
-                   jobs_completed  = jobs_completed + 1
-               WHERE id = %s""",
-            (artisan_gets, artisan_gets, job["worker_id"])
-        )
+        if job.get("job_type") == "quick_gig":
+            cur.execute(
+                """UPDATE users
+                   SET escrow_balance = escrow_balance + %s,
+                       total_earned   = total_earned   + %s,
+                       jobs_completed  = jobs_completed + 1,
+                       quick_gigs_completed = quick_gigs_completed + 1
+                   WHERE id = %s""",
+                (artisan_gets, artisan_gets, job["worker_id"])
+            )
+        else:
+            cur.execute(
+                """UPDATE users
+                   SET escrow_balance = escrow_balance + %s,
+                       total_earned   = total_earned   + %s,
+                       jobs_completed  = jobs_completed + 1
+                   WHERE id = %s""",
+                (artisan_gets, artisan_gets, job["worker_id"])
+            )
 
         conn.commit()
         return jsonify({
@@ -951,14 +962,25 @@ def api_review_job():
         if action == "approve":
             artisan_gets = float(job.get("artisan_gets") or job["amount"] or 0)
             cur.execute("UPDATE jobs SET status='paid', paid_at=NOW() WHERE id=%s", (job_id,))
-            cur.execute(
-            """UPDATE users 
-               SET escrow_balance = escrow_balance + %s,
-                   total_earned   = total_earned   + %s,
-                   jobs_completed = jobs_completed + 1
-               WHERE id=%s""",
-            (artisan_gets, artisan_gets, job["worker_id"])
-        )
+            if job.get("job_type") == "quick_gig":
+                cur.execute(
+                    """UPDATE users 
+                    SET escrow_balance = escrow_balance + %s,
+                        total_earned   = total_earned   + %s,
+                        jobs_completed = jobs_completed + 1,
+                        quick_gigs_completed = quick_gigs_completed + 1
+                    WHERE id=%s""",
+                    (artisan_gets, artisan_gets, job["worker_id"])
+                )
+            else:
+                cur.execute(
+                    """UPDATE users 
+                    SET escrow_balance = escrow_balance + %s,
+                        total_earned   = total_earned   + %s,
+                        jobs_completed = jobs_completed + 1
+                    WHERE id=%s""",
+                    (artisan_gets, artisan_gets, job["worker_id"])
+                )
             message = "Payment released to the artisan."
         else:
             cur.execute(
