@@ -1000,7 +1000,7 @@ def api_rate_worker():
     try:
         cur.execute(
             """SELECT * FROM jobs WHERE id=%s AND client_id=%s
-               AND status IN ('verified','paid') AND distance_meters <= 100""",
+               AND status IN ('verified','paid')""",
             (job_id, user_id)
         )
         job = cur.fetchone()
