@@ -205,6 +205,9 @@ def api_post_job():
     title        = request.form.get("title", "").strip()
     description  = request.form.get("description", "").strip()
     trade        = request.form.get("trade", "").strip()
+    job_type     = request.form.get("job_type", "skilled").strip()
+    if job_type not in ("skilled", "quick_gig"):
+        job_type = "skilled"
     site_address = request.form.get("site_address", "").strip()
     lat          = request.form.get("site_lat")
     lng          = request.form.get("site_lng")
@@ -227,12 +230,12 @@ def api_post_job():
     try:
         cur.execute(
             """INSERT INTO jobs
-               (client_id, title, description, trade,
+               (client_id, title, description, trade, job_type,
                 site_address, site_lat, site_lng,
                 amount, platform_fee, client_pays, artisan_gets,
                 status, created_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'open', NOW())""",
-            (user_id, title, description, trade,
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'open', NOW())""",
+            (user_id, title, description, trade, job_type,
              site_address, lat, lng,
              fees["amount"], fees["platform_fee"],
              fees["client_pays"], fees["artisan_gets"])
@@ -293,6 +296,7 @@ def api_post_job():
         return jsonify({
             "success":     True,
             "job_id":      job_id,
+            "job_type":    job_type,
             "payment":     payment_info,
             "fee_breakdown": {
                 "job_amount":   fees["amount"],
@@ -310,8 +314,7 @@ def api_post_job():
     finally:
         cur.close()
         conn.close()
-
-        
+                
 # ── Get Jobs ──────────────────────────────────────────────────────────────────
 @client_bp.route("/jobs")
 def api_client_jobs():
