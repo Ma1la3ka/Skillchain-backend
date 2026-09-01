@@ -314,8 +314,8 @@ def api_post_job():
     finally:
         cur.close()
         conn.close()
-                
-# ── Get Jobs ──────────────────────────────────────────────────────────────────
+
+# ── Get Jobs ─
 @client_bp.route("/jobs")
 def api_client_jobs():
     """Get all jobs posted by this client"""
