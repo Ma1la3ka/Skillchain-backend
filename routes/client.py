@@ -333,6 +333,9 @@ def api_client_jobs():
                       u.trade      AS worker_trade,
                       u.trust_score AS worker_trust,
                       u.phone      AS worker_phone,
+                      u.shop_lat   AS worker_shop_lat,
+                      u.shop_lng   AS worker_shop_lng,
+                      u.shop_address AS worker_shop_address,
                       (SELECT COUNT(*) FROM job_applications ja
                        WHERE ja.job_id = j.id AND ja.status = 'pending') AS applicant_count
                FROM jobs j
@@ -349,6 +352,8 @@ def api_client_jobs():
             j["artisan_gets"]    = float(j["artisan_gets"] or 0)
             j["applicant_count"] = int(j["applicant_count"] or 0)
             j["worker_trust"]    = float(j["worker_trust"] or 0) if j["worker_trust"] else None
+            j["worker_shop_lat"] = float(j["worker_shop_lat"]) if j.get("worker_shop_lat") else None
+            j["worker_shop_lng"] = float(j["worker_shop_lng"]) if j.get("worker_shop_lng") else None
             j["created_at"]      = str(j["created_at"])
             j["paid_at"]         = str(j["paid_at"]) if j.get("paid_at") else None
         return jsonify({"jobs": jobs})
