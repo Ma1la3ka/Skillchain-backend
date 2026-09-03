@@ -363,6 +363,106 @@ def api_client_jobs():
     finally:
         cur.close()
         conn.close()
+
+
+# ── Gig Applicants (multi-slot quick gig requests) ──────────────────────────────
+@client_bp.route("/gig-applicants")
+def api_client_gig_applicants():
+    """Pending worker requests for a multi-slot quick gig"""
+    job_id  = request.args.get("job_id", "").strip()
+    user_id = request.args.get("user_id", "").strip()
+    if not job_id or not user_id:
+        return jsonify({"error": "job_id and user_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute("SELECT id FROM jobs WHERE id=%s AND client_id=%s", (job_id, user_id))
+        if not cur.fetchone():
+            return jsonify({"error": "Job not found or not yours"}), 404
+
+        cur.execute(
+            """SELECT jw.id, jw.worker_id, jw.status, jw.requested_at,
+                      u.name, u.trade, u.trust_score, u.jobs_completed
+               FROM job_workers jw JOIN users u ON u.id = jw.worker_id
+               WHERE jw.job_id=%s AND jw.status='pending'
+               ORDER BY u.trust_score DESC""",
+            (job_id,)
+        )
+        rows = cur.fetchall()
+        for r in rows:
+            r["trust_score"]    = float(r["trust_score"] or 0)
+            r["jobs_completed"] = int(r["jobs_completed"] or 0)
+            r["requested_at"]   = str(r["requested_at"])
+        return jsonify({"applicants": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@client_bp.route("/review-gig-worker", methods=["POST"])
+def api_review_gig_worker():
+    """Assign or decline one worker's request on a multi-slot quick gig."""
+    data          = request.get_json(silent=True) or {}
+    job_worker_id = data.get("job_worker_id")
+    user_id       = str(data.get("user_id", "")).strip()
+    action        = data.get("action", "").strip()  # 'assign' or 'decline'
+
+    if not job_worker_id or not user_id or action not in ("assign", "decline"):
+        return jsonify({"success": False, "message": "job_worker_id, user_id and action required."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT jw.*, j.client_id, j.slots_needed, j.slots_filled, j.title
+               FROM job_workers jw JOIN jobs j ON j.id = jw.job_id
+               WHERE jw.id=%s AND jw.status='pending'""",
+            (job_worker_id,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"success": False, "message": "Request not found or already resolved."}), 404
+        if str(row["client_id"]) != user_id:
+            return jsonify({"success": False, "message": "Not your job."}), 403
+
+        if action == "decline":
+            cur.execute("UPDATE job_workers SET status='declined' WHERE id=%s", (job_worker_id,))
+            conn.commit()
+            return jsonify({"success": True, "action": "decline"})
+
+        # ── assign ──
+        if row["slots_filled"] >= row["slots_needed"]:
+            return jsonify({"success": False, "message": "All slots are already filled."}), 409
+
+        cur.execute(
+            "UPDATE job_workers SET status='assigned', assigned_at=NOW() WHERE id=%s",
+            (job_worker_id,)
+        )
+        new_filled = row["slots_filled"] + 1
+        cur.execute("UPDATE jobs SET slots_filled=%s WHERE id=%s", (new_filled, row["job_id"]))
+        if new_filled >= row["slots_needed"]:
+            cur.execute("UPDATE jobs SET status='assigned' WHERE id=%s", (row["job_id"],))
+
+        assign_msg = f"🎉 You've been assigned a slot on \"{row['title']}\"! Escrow funding coming next."
+        cur.execute(
+            """INSERT INTO messages (job_id, sender_id, recipient_id, body, content, created_at)
+               VALUES (%s, %s, %s, %s, %s, NOW())""",
+            (row["job_id"], user_id, row["worker_id"], assign_msg, assign_msg)
+        )
+        conn.commit()
+        return jsonify({
+            "success": True, "action": "assign",
+            "slots_filled": new_filled, "slots_needed": row["slots_needed"]
+        })
+    except Exception as e:
+        conn.rollback()
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
         
 @client_bp.route("/direct-hire", methods=["POST"])
 def api_direct_hire():

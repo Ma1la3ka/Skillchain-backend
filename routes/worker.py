@@ -168,7 +168,9 @@ def api_worker_open_jobs():
     cur = conn.cursor(dictionary=True)
 
     sql = """SELECT j.*,
-                c.name AS client_name
+                c.name AS client_name,
+                (SELECT jw.status FROM job_workers jw
+                 WHERE jw.job_id = j.id AND jw.worker_id = %s) AS my_gig_status
             FROM jobs j
             LEFT JOIN users c ON c.id = j.client_id
             WHERE j.status = 'open'
@@ -176,8 +178,13 @@ def api_worker_open_jobs():
             AND (
                 (j.visibility = 'public' AND j.worker_id IS NULL)
                 OR (j.visibility = 'private' AND j.invited_worker_id = %s)
+            )
+            AND (
+                j.slots_needed <= 1
+                OR j.slots_filled < j.slots_needed
+                OR EXISTS (SELECT 1 FROM job_workers jw2 WHERE jw2.job_id = j.id AND jw2.worker_id = %s)
             )"""
-    params = [user_id, user_id]
+    params = [user_id, user_id, user_id, user_id]
     if trade:
         sql += " AND j.trade = %s"
         params.append(trade)
@@ -219,7 +226,10 @@ def api_worker_accept_job():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT id, status, client_id FROM jobs WHERE id = %s", (job_id,))
+        cur.execute(
+    "SELECT id, status, client_id, job_type, slots_needed, slots_filled, amount FROM jobs WHERE id = %s",
+    (job_id,)
+        )
         job = cur.fetchone()
 
         if not job:
@@ -228,6 +238,30 @@ def api_worker_accept_job():
             return jsonify({"success": False, "message": "You can't accept your own job."}), 403
         if job["status"] != "open":
             return jsonify({"success": False, "message": "Job is no longer open."}), 409
+
+        # ── Multi-slot quick gig — request a slot instead of the single-worker flow ──
+                # worker_shop only valid if this worker actually has a shop location saved
+        if requested_location == "worker_shop":
+            cur.execute("SELECT shop_lat, shop_lng FROM users WHERE id = %s", (user_id,))
+            wu = cur.fetchone()
+            if not wu or not wu["shop_lat"] or not wu["shop_lng"]:
+                requested_location = "client_site"
+
+        # ── Multi-slot quick gig — request a slot instead of the single-worker flow ──
+        if job["job_type"] == "quick_gig" and job["slots_needed"] > 1:
+            if job["slots_filled"] >= job["slots_needed"]:
+                return jsonify({"success": False, "message": "All slots for this gig are filled."}), 409
+            try:
+                cur.execute(
+                    """INSERT INTO job_workers (job_id, worker_id, status, amount, work_location_type, requested_at)
+                       VALUES (%s, %s, 'pending', %s, %s, NOW())""",
+                    (job_id, user_id, job["amount"], requested_location)
+                )
+                conn.commit()
+                return jsonify({"success": True, "message": "Request sent! Waiting for client approval."})
+            except Exception:
+                conn.rollback()
+                return jsonify({"success": False, "message": "You've already requested this gig."}), 409
 
         # worker_shop only valid if this worker actually has a shop location saved
         if requested_location == "worker_shop":
