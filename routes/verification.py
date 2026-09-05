@@ -70,7 +70,8 @@ def api_verify_job():
             if in_range:
                 cur.execute(
                     """UPDATE job_workers SET
-                       distance_meters=%s, status=%s, verified_at=NOW()
+                       distance_meters=%s, status=%s, verified_at=NOW(),
+                       review_deadline=NOW() + INTERVAL 24 HOUR
                        WHERE id=%s""",
                     (distance, new_status, job_worker_id)
                 )
