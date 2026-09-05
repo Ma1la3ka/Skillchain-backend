@@ -485,6 +485,40 @@ def api_recommend_workers():
     })
 
 
+@worker_bp.route("/my-gig-slots")
+def api_worker_my_gig_slots():
+    """Get this worker's assigned multi-slot gig assignments"""
+    user_id = request.args.get("user_id", "").strip()
+    if not user_id:
+        return jsonify({"error": "user_id required"}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT jw.*, j.title, j.trade, j.site_address, j.site_lat, j.site_lng,
+                      j.job_type, c.name AS client_name
+               FROM job_workers jw
+               JOIN jobs j ON j.id = jw.job_id
+               JOIN users c ON c.id = j.client_id
+               WHERE jw.worker_id = %s AND jw.status != 'declined'
+               ORDER BY jw.requested_at DESC""",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        for r in rows:
+            r["amount"] = float(r["amount"] or 0)
+            r["distance_meters"] = float(r["distance_meters"]) if r.get("distance_meters") else None
+            r["requested_at"] = str(r["requested_at"])
+            r["assigned_at"] = str(r["assigned_at"]) if r.get("assigned_at") else None
+            r["verified_at"] = str(r["verified_at"]) if r.get("verified_at") else None
+            r["paid_at"] = str(r["paid_at"]) if r.get("paid_at") else None
+        return jsonify({"slots": rows})
+    finally:
+        cur.close()
+        conn.close()
+
+
 @worker_bp.route("/open-jobs-social")
 def api_open_jobs_social():
     """Get open jobs with social data (likes, comments, bargains)"""

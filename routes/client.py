@@ -437,16 +437,38 @@ def api_review_gig_worker():
         if row["slots_filled"] >= row["slots_needed"]:
             return jsonify({"success": False, "message": "All slots are already filled."}), 409
 
+        fees = calculate_fees(row["amount"])
         cur.execute(
-            "UPDATE job_workers SET status='assigned', assigned_at=NOW() WHERE id=%s",
-            (job_worker_id,)
+            """UPDATE job_workers SET
+               status='assigned', assigned_at=NOW(),
+               platform_fee=%s, client_pays=%s, artisan_gets=%s
+               WHERE id=%s""",
+            (fees["platform_fee"], fees["client_pays"], fees["artisan_gets"], job_worker_id)
         )
         new_filled = row["slots_filled"] + 1
         cur.execute("UPDATE jobs SET slots_filled=%s WHERE id=%s", (new_filled, row["job_id"]))
         if new_filled >= row["slots_needed"]:
             cur.execute("UPDATE jobs SET status='assigned' WHERE id=%s", (row["job_id"],))
 
-        assign_msg = f"🎉 You've been assigned a slot on \"{row['title']}\"! Escrow funding coming next."
+        # ── Generate this worker's own Paystack collection account ──
+        cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
+        client_row = cur.fetchone()
+        if client_row and client_row.get("email"):
+            from utils import paystack_create_collection_account
+            collection = paystack_create_collection_account(
+                f"gig_{job_worker_id}", fees["client_pays"], client_row["email"]
+            )
+            if collection:
+                cur.execute(
+                    """UPDATE job_workers SET
+                       collection_account_number=%s, collection_bank_name=%s,
+                       collection_bank_code=%s, escrow_reference=%s
+                       WHERE id=%s""",
+                    (collection.get("account_number"), collection.get("bank_name"),
+                     collection.get("bank_code"), collection.get("reference"), job_worker_id)
+                )
+
+        assign_msg = f"🎉 You've been assigned a slot on \"{row['title']}\"! The client will fund escrow next."
         cur.execute(
             """INSERT INTO messages (job_id, sender_id, recipient_id, body, content, created_at)
                VALUES (%s, %s, %s, %s, %s, NOW())""",
@@ -537,6 +559,64 @@ def api_direct_hire():
     except Exception as e:
         conn.rollback()
         print(f"[direct-hire error] {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    finally:
+        cur.close()
+        conn.close()
+
+
+@client_bp.route("/review-gig-submission", methods=["POST"])
+def api_review_gig_submission():
+    """Client approves (releases payment) or disputes a verified gig-slot submission"""
+    data          = request.get_json(silent=True) or {}
+    job_worker_id = data.get("job_worker_id")
+    user_id       = str(data.get("user_id", "")).strip()
+    action        = data.get("action", "").strip()
+    reason        = data.get("reason", "").strip()
+
+    if not job_worker_id or not user_id or action not in ("approve", "dispute"):
+        return jsonify({"success": False, "message": "job_worker_id, user_id and action required."}), 400
+    if action == "dispute" and not reason:
+        return jsonify({"success": False, "message": "A reason is required to dispute."}), 400
+
+    conn = get_db()
+    cur  = conn.cursor(dictionary=True)
+    try:
+        cur.execute(
+            """SELECT jw.*, j.client_id, j.job_type
+               FROM job_workers jw JOIN jobs j ON j.id = jw.job_id
+               WHERE jw.id=%s AND j.client_id=%s AND jw.status IN ('verified','pending_verification')""",
+            (job_worker_id, user_id)
+        )
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"success": False, "already_resolved": True,
+                            "message": "Submission not found or already resolved."}), 404
+
+        if action == "approve":
+            artisan_gets = float(row.get("artisan_gets") or row["amount"] or 0)
+            cur.execute("UPDATE job_workers SET status='paid', paid_at=NOW() WHERE id=%s", (job_worker_id,))
+            cur.execute(
+                """UPDATE users SET
+                   escrow_balance = escrow_balance + %s,
+                   total_earned   = total_earned   + %s,
+                   jobs_completed = jobs_completed + 1,
+                   quick_gigs_completed = quick_gigs_completed + 1
+                   WHERE id=%s""",
+                (artisan_gets, artisan_gets, row["worker_id"])
+            )
+            message = "Payment released to the artisan."
+        else:
+            cur.execute(
+                "UPDATE job_workers SET status='pending_verification' WHERE id=%s",
+                (job_worker_id,)
+            )
+            message = "Dispute noted. Please follow up directly with the worker."
+
+        conn.commit()
+        return jsonify({"success": True, "action": action, "message": message})
+    except Exception as e:
+        conn.rollback()
         return jsonify({"success": False, "message": str(e)}), 500
     finally:
         cur.close()

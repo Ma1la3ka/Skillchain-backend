@@ -12,15 +12,16 @@ media_bp = Blueprint('media', __name__, url_prefix='/api')
 
 @media_bp.route("/job/upload-media", methods=["POST"])
 def api_upload_media():
-    job_id     = request.form.get("job_id")
-    user_id    = request.form.get("user_id", "").strip()
-    proof_lat  = request.form.get("proof_lat")
-    proof_lng  = request.form.get("proof_lng")
-    check_only = request.form.get("check_only", "0") == "1"
-    files      = request.files.getlist("files")
+    job_id        = request.form.get("job_id")
+    job_worker_id = request.form.get("job_worker_id")
+    user_id       = request.form.get("user_id", "").strip()
+    proof_lat     = request.form.get("proof_lat")
+    proof_lng     = request.form.get("proof_lng")
+    check_only    = request.form.get("check_only", "0") == "1"
+    files         = request.files.getlist("files")
 
-    if not all([job_id, user_id]):
-        return jsonify({"success": False, "message": "job_id and user_id required."}), 400
+    if not user_id or not (job_id or job_worker_id):
+        return jsonify({"success": False, "message": "user_id and (job_id or job_worker_id) required."}), 400
 
     try:
         proof_lat = float(proof_lat) if proof_lat else None
@@ -31,13 +32,25 @@ def api_upload_media():
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
-        cur.execute(
-            "SELECT * FROM jobs WHERE id = %s AND worker_id = %s",
-            (job_id, user_id)
-        )
-        job = cur.fetchone()
-        if not job:
-            return jsonify({"success": False, "message": "Job not found or not assigned to you."}), 404
+        if job_worker_id:
+            cur.execute(
+                """SELECT jw.*, j.site_lat, j.site_lng
+                   FROM job_workers jw JOIN jobs j ON j.id = jw.job_id
+                   WHERE jw.id = %s AND jw.worker_id = %s""",
+                (job_worker_id, user_id)
+            )
+            job = cur.fetchone()
+            if not job:
+                return jsonify({"success": False, "message": "Slot not found or not assigned to you."}), 404
+            job_id = job["job_id"]  # so downstream job_id references still work
+        else:
+            cur.execute(
+                "SELECT * FROM jobs WHERE id = %s AND worker_id = %s",
+                (job_id, user_id)
+            )
+            job = cur.fetchone()
+            if not job:
+                return jsonify({"success": False, "message": "Job not found or not assigned to you."}), 404
 
         # Determine geofence anchor based on where this job's work happens
         if job.get("work_location_type") == "worker_shop":

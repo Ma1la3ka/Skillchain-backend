@@ -6,23 +6,38 @@ jobs_bp = Blueprint('jobs', __name__, url_prefix='/api/job')
 
 @jobs_bp.route("/payment-details")
 def api_job_payment_details():
-    """Get payment details for a job"""
-    job_id = request.args.get("job_id")
-    user_id = request.args.get("user_id")
-    if not job_id:
-        return jsonify({"error": "job_id required"}), 400
+    """Get payment details for a job (or a specific worker's slot on a multi-slot gig)"""
+    job_id        = request.args.get("job_id")
+    job_worker_id = request.args.get("job_worker_id")
+    user_id       = request.args.get("user_id")
 
     conn = get_db()
     cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT id, title, amount, client_pays, artisan_gets, platform_fee,
-                  collection_account_number, collection_bank_name, collection_bank_code,
-                  escrow_paid, escrow_paid_at, escrow_amount_received,
-                  status, worker_id
-           FROM jobs WHERE id = %s AND client_id = %s""",
-        (job_id, user_id)
-    )
-    job = cur.fetchone()
+
+    if job_worker_id:
+        cur.execute(
+            """SELECT jw.id, jw.amount, jw.client_pays, jw.artisan_gets, jw.platform_fee,
+                      jw.collection_account_number, jw.collection_bank_name, jw.collection_bank_code,
+                      jw.escrow_paid, jw.escrow_paid_at, jw.escrow_amount_received,
+                      jw.status, jw.worker_id, j.title, j.client_id
+               FROM job_workers jw JOIN jobs j ON j.id = jw.job_id
+               WHERE jw.id = %s AND j.client_id = %s""",
+            (job_worker_id, user_id)
+        )
+        job = cur.fetchone()
+    else:
+        if not job_id:
+            return jsonify({"error": "job_id or job_worker_id required"}), 400
+        cur.execute(
+            """SELECT id, title, amount, client_pays, artisan_gets, platform_fee,
+                      collection_account_number, collection_bank_name, collection_bank_code,
+                      escrow_paid, escrow_paid_at, escrow_amount_received,
+                      status, worker_id
+               FROM jobs WHERE id = %s AND client_id = %s""",
+            (job_id, user_id)
+        )
+        job = cur.fetchone()
+
     cur.close()
     conn.close()
 
@@ -40,21 +55,33 @@ def api_job_payment_details():
 
 @jobs_bp.route("/escrow-status")
 def api_escrow_status():
-    """Check escrow payment status"""
-    job_id = request.args.get("job_id")
-    user_id = request.args.get("user_id")
-    if not job_id:
-        return jsonify({"error": "job_id required"}), 400
+    """Check escrow payment status for a job (or a specific worker's slot)"""
+    job_id        = request.args.get("job_id")
+    job_worker_id = request.args.get("job_worker_id")
+    user_id       = request.args.get("user_id")
 
     conn = get_db()
     cur = conn.cursor(dictionary=True)
-    cur.execute(
-        """SELECT id, amount, escrow_paid, escrow_paid_at, escrow_amount_received,
-                  collection_account_number, collection_bank_name, status
-           FROM jobs WHERE id = %s""",
-        (job_id,)
-    )
-    row = cur.fetchone()
+
+    if job_worker_id:
+        cur.execute(
+            """SELECT id, amount, escrow_paid, escrow_paid_at, escrow_amount_received,
+                      collection_account_number, collection_bank_name, status
+               FROM job_workers WHERE id = %s AND worker_id = %s""",
+            (job_worker_id, user_id)
+        )
+        row = cur.fetchone()
+    else:
+        if not job_id:
+            return jsonify({"error": "job_id or job_worker_id required"}), 400
+        cur.execute(
+            """SELECT id, amount, escrow_paid, escrow_paid_at, escrow_amount_received,
+                      collection_account_number, collection_bank_name, status
+               FROM jobs WHERE id = %s""",
+            (job_id,)
+        )
+        row = cur.fetchone()
+
     cur.close()
     conn.close()
 
