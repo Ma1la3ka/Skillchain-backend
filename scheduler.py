@@ -1,6 +1,7 @@
 """
 Background scheduler: auto-releases escrowed payment to the artisan if the
-client hasn't approved/disputed a 'pending_review' job within 24 hours.
+client hasn't approved/disputed a 'pending_review' job (or gig slot) within
+24 hours.
 
 Uses APScheduler running inside the same process as Flask. This is fine for
 a single-process dev server (e.g. `python main.py` or `flask run`), but if
@@ -10,16 +11,17 @@ to a separate one-off process/cron instead of starting it from create_app().
 """
 from apscheduler.schedulers.background import BackgroundScheduler
 from database_helper import get_db
-from utils import release_job_payment
+from utils import release_job_payment, release_gig_slot_payment
 
 _scheduler = None
 
 
 def _auto_release_overdue_jobs():
-    """Find jobs stuck in pending_review past their review_deadline and pay out."""
+    """Find jobs (and multi-slot gig slots) stuck past their review_deadline and pay out."""
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
+        # ── Regular jobs / single-slot gigs ──
         cur.execute(
             """SELECT * FROM jobs
                WHERE status = 'verified'
@@ -34,12 +36,35 @@ def _auto_release_overdue_jobs():
                 ref = release_job_payment(job, cur)
                 conn.commit()
                 if ref is None:
-                    print(f"[auto-release] Job {job['id']} already resolved by someone else — skipped.")
+                    print(f"[auto-release] Job {job['id']} already resolved or unfunded — skipped.")
                 else:
                     print(f"[auto-release] Job {job['id']} auto-paid after 24h (ref={ref})")
             except Exception as e:
                 conn.rollback()
                 print(f"[auto-release] Failed for job {job['id']}: {e}")
+
+        # ── Multi-slot gig slots ──
+        cur.execute(
+            """SELECT * FROM job_workers
+               WHERE status = 'verified'
+                 AND paid_at IS NULL
+                 AND review_deadline IS NOT NULL
+                 AND review_deadline <= NOW()"""
+        )
+        overdue_slots = cur.fetchall()
+
+        for slot in overdue_slots:
+            try:
+                ref = release_gig_slot_payment(slot, cur)
+                conn.commit()
+                if ref is None:
+                    print(f"[auto-release] Slot {slot['id']} already resolved or unfunded — skipped.")
+                else:
+                    print(f"[auto-release] Slot {slot['id']} auto-paid after 24h (ref={ref})")
+            except Exception as e:
+                conn.rollback()
+                print(f"[auto-release] Failed for slot {slot['id']}: {e}")
+
     except Exception as e:
         print(f"[auto-release] Query error: {e}")
     finally:

@@ -2,6 +2,7 @@
 from flask import Blueprint, request, jsonify
 from database_helper import get_db
 from datetime import datetime, timedelta
+from utils import release_job_payment, release_gig_slot_payment
 
 client_bp = Blueprint('client', __name__, url_prefix='/api/client')
 
@@ -567,7 +568,13 @@ def api_direct_hire():
 
 @client_bp.route("/review-gig-submission", methods=["POST"])
 def api_review_gig_submission():
-    """Client approves (releases payment) or disputes a verified gig-slot submission"""
+    """Client approves (releases payment) or disputes a verified gig-slot submission.
+
+    Payout logic delegated to release_gig_slot_payment (utils.py) — the
+    single source of truth for job_workers payouts, shared with the 24h
+    auto-release scheduler. This route only handles the dispute branch
+    and the plumbing around calling that function.
+    """
     data          = request.get_json(silent=True) or {}
     job_worker_id = data.get("job_worker_id")
     user_id       = str(data.get("user_id", "")).strip()
@@ -594,27 +601,25 @@ def api_review_gig_submission():
                             "message": "Submission not found or already resolved."}), 404
 
         if action == "approve":
-            artisan_gets = float(row.get("artisan_gets") or row["amount"] or 0)
-            cur.execute("UPDATE job_workers SET status='paid', paid_at=NOW() WHERE id=%s", (job_worker_id,))
-            cur.execute(
-                """UPDATE users SET
-                   escrow_balance = escrow_balance + %s,
-                   total_earned   = total_earned   + %s,
-                   jobs_completed = jobs_completed + 1,
-                   quick_gigs_completed = quick_gigs_completed + 1
-                   WHERE id=%s""",
-                (artisan_gets, artisan_gets, row["worker_id"])
-            )
-            message = "Payment released to the artisan."
+            ref = release_gig_slot_payment(row, cur)
+            if ref is None:
+                conn.rollback()
+                return jsonify({
+                    "success": False,
+                    "message": "Escrow has not been funded for this slot yet, or it was already resolved."
+                }), 409
+            conn.commit()
+            return jsonify({"success": True, "action": "approve",
+                            "message": "Payment released to the artisan.",
+                            "transfer_reference": ref})
         else:
             cur.execute(
                 "UPDATE job_workers SET status='pending_verification' WHERE id=%s",
                 (job_worker_id,)
             )
-            message = "Dispute noted. Please follow up directly with the worker."
-
-        conn.commit()
-        return jsonify({"success": True, "action": action, "message": message})
+            conn.commit()
+            return jsonify({"success": True, "action": "dispute",
+                            "message": "Dispute noted. Please follow up directly with the worker."})
     except Exception as e:
         conn.rollback()
         return jsonify({"success": False, "message": str(e)}), 500
@@ -732,6 +737,9 @@ def api_client_pending_review_jobs():
 
 
 # ── Assign Worker ─────────────────────────────────────────────────────────────
+# NOTE: superseded by /api/client/review-worker, which does the same thing
+# plus notifies other applicants. Kept only in case something still calls
+# this old route — confirm nothing does, then delete.
 @client_bp.route("/assign-worker", methods=["POST"])
 def api_assign_worker():
     """Assign a worker to a job"""
@@ -781,6 +789,9 @@ def api_assign_worker():
 
 
 # ── Approve Job ───────────────────────────────────────────────────────────────
+# NOTE: superseded by /api/client/review-job, which now delegates to
+# release_job_payment (utils.py) with the escrow_paid guard. Kept only in
+# case something still calls this old route — confirm nothing does, then delete.
 @client_bp.route("/approve-job", methods=["POST"])
 def api_approve_job():
     """
@@ -809,43 +820,19 @@ def api_approve_job():
             return jsonify({"success": False,
                             "message": "Job not found or not eligible for approval."}), 404
 
-        # Use stored artisan_gets (fee-adjusted amount)
-        # Fall back to raw amount if column not yet populated
-        artisan_gets = float(job.get("artisan_gets") or job["amount"] or 0)
-
-        # Mark job paid
-        cur.execute(
-            "UPDATE jobs SET status='paid', paid_at=NOW() WHERE id=%s",
-            (job_id,)
-        )
-
-                # Credit artisan's internal balance — no Squad/Paystack call here.
-        # Money moves to bank when artisan clicks Withdraw.
-        if job.get("job_type") == "quick_gig":
-            cur.execute(
-                """UPDATE users
-                   SET escrow_balance = escrow_balance + %s,
-                       total_earned   = total_earned   + %s,
-                       jobs_completed  = jobs_completed + 1,
-                       quick_gigs_completed = quick_gigs_completed + 1
-                   WHERE id = %s""",
-                (artisan_gets, artisan_gets, job["worker_id"])
-            )
-        else:
-            cur.execute(
-                """UPDATE users
-                   SET escrow_balance = escrow_balance + %s,
-                       total_earned   = total_earned   + %s,
-                       jobs_completed  = jobs_completed + 1
-                   WHERE id = %s""",
-                (artisan_gets, artisan_gets, job["worker_id"])
-            )
-
+        ref = release_job_payment(job, cur)
+        if ref is None:
+            conn.rollback()
+            return jsonify({
+                "success": False,
+                "message": "Escrow has not been funded for this job yet, or it was already resolved."
+            }), 409
         conn.commit()
+
         return jsonify({
             "success":     True,
             "message":     "Job approved. Artisan's balance has been credited.",
-            "artisan_gets": artisan_gets,
+            "transfer_reference": ref,
         })
     except Exception as e:
         conn.rollback()
@@ -974,8 +961,12 @@ def api_respond_bargain():
                  bargain["worker_id"], bargain["job_id"])
             )
 
-            # Auto-reject every other pending bargain on this job —
+            # Auto-reject every other pending applicant/bargain on this job —
             # the job is no longer open for negotiation once one is accepted.
+            cur.execute(
+                "UPDATE job_applications SET status='rejected' WHERE job_id=%s AND worker_id != %s",
+                (bargain["job_id"], bargain["worker_id"])
+            )
             cur.execute(
                 "UPDATE bargains SET status='rejected' WHERE job_id=%s AND id != %s AND status='pending'",
                 (bargain["job_id"], bargain_id)
@@ -1120,7 +1111,13 @@ def api_review_worker():
 # ── Review Job Submission (approve payment or dispute) ─────────────────────────
 @client_bp.route("/review-job", methods=["POST"])
 def api_review_job():
-    """Client approves (releases payment) or disputes a verified job submission"""
+    """Client approves (releases payment) or disputes a verified job submission.
+
+    Payout logic delegated to release_job_payment (utils.py) — the single
+    source of truth for jobs-table payouts, shared with the 24h auto-release
+    scheduler. This route only handles the dispute branch and the plumbing
+    around calling that function.
+    """
     data    = request.get_json(silent=True) or {}
     job_id  = data.get("job_id")
     user_id = str(data.get("user_id", "")).strip()
@@ -1145,37 +1142,25 @@ def api_review_job():
                             "message": "Job not found or already resolved."}), 404
 
         if action == "approve":
-            artisan_gets = float(job.get("artisan_gets") or job["amount"] or 0)
-            cur.execute("UPDATE jobs SET status='paid', paid_at=NOW() WHERE id=%s", (job_id,))
-            if job.get("job_type") == "quick_gig":
-                cur.execute(
-                    """UPDATE users 
-                    SET escrow_balance = escrow_balance + %s,
-                        total_earned   = total_earned   + %s,
-                        jobs_completed = jobs_completed + 1,
-                        quick_gigs_completed = quick_gigs_completed + 1
-                    WHERE id=%s""",
-                    (artisan_gets, artisan_gets, job["worker_id"])
-                )
-            else:
-                cur.execute(
-                    """UPDATE users 
-                    SET escrow_balance = escrow_balance + %s,
-                        total_earned   = total_earned   + %s,
-                        jobs_completed = jobs_completed + 1
-                    WHERE id=%s""",
-                    (artisan_gets, artisan_gets, job["worker_id"])
-                )
-            message = "Payment released to the artisan."
+            ref = release_job_payment(job, cur)
+            if ref is None:
+                conn.rollback()
+                return jsonify({
+                    "success": False,
+                    "message": "Escrow has not been funded for this job yet, or it was already resolved."
+                }), 409
+            conn.commit()
+            return jsonify({"success": True, "action": "approve",
+                            "message": "Payment released to the artisan.",
+                            "transfer_reference": ref})
         else:
             cur.execute(
                 "UPDATE jobs SET status='disputed', dispute_reason=%s, disputed_at=NOW() WHERE id=%s",
                 (reason, job_id)
             )
-            message = "Dispute submitted. Our team will review within 24 hours."
-
-        conn.commit()
-        return jsonify({"success": True, "action": action, "message": message})
+            conn.commit()
+            return jsonify({"success": True, "action": "dispute",
+                            "message": "Dispute submitted. Our team will review within 24 hours."})
     except Exception as e:
         conn.rollback()
         print(f"[review-job error] {e}")

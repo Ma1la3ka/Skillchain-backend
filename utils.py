@@ -65,8 +65,14 @@ def paystack_create_collection_account(job_id: int, amount: float, email: str) -
     return {}
 
 
-def paystack_payout(job, worker_id, cur):
-    """Transfer job amount to the worker's bank account via Paystack."""
+def paystack_payout(job, worker_id, payout_amount, cur):
+    """Transfer the given amount to the worker's bank account via Paystack.
+
+    `job` may be a row from either `jobs` or `job_workers` — only `job['id']`
+    is used here (for the transfer reference/reason text), so both shapes work.
+    `payout_amount` must already be the fee-adjusted amount (artisan_gets),
+    resolved by the caller — this function never recomputes it from job['amount'].
+    """
     cur.execute(
         """SELECT bank_account_no, bank_code, bank_account_name, name,
                   paystack_recipient_code
@@ -102,7 +108,7 @@ def paystack_payout(job, worker_id, cur):
     reference = f"pay_{job['id']}_{uuid.uuid4().hex[:8]}"
 
     transfer_result = initiate_transfer(
-        amount_naira=float(job["amount"]),
+        amount_naira=payout_amount,
         recipient_code=recipient_code,
         reference=reference,
         reason=f"SkillChain payment for job #{job['id']}"
@@ -114,16 +120,31 @@ def paystack_payout(job, worker_id, cur):
 
 def release_job_payment(job, cur):
     """
-    Pay out escrowed funds to the worker and finalize the job as 'paid'.
-    Shared by: client approval endpoint AND the 24h auto-release scheduler.
+    Pay out escrowed funds to the worker and finalize a *regular job* (or
+    single-slot gig) as 'paid'. Single source of truth for this table —
+    called by: client approval endpoint (review-job) AND the 24h
+    auto-release scheduler. Do not duplicate this logic elsewhere.
 
     SAFE AGAINST DOUBLE-PAYOUT: claims the job atomically first by flipping
     the existing `paid_at` column from NULL to NOW() in one conditional
     UPDATE. Only one caller can win that race; the loser backs off cleanly.
 
-    Returns the transfer_reference on success, or None if already claimed.
+    SAFE AGAINST UNFUNDED PAYOUT: refuses to release if escrow_paid is not
+    set — this can happen if a worker submits proof before the client ever
+    funds escrow, and 24h passes with no client action.
+
+    Trust score is NOT bumped here — it's derived solely from client_rating
+    averages in api_rate_worker, so a job paid without a rating (e.g. via
+    24h auto-release) doesn't inflate the score with no real signal behind it.
+
+    Returns the transfer_reference on success, or None if already claimed
+    or escrow was never funded.
     """
     job_id = job["id"]
+
+    if not job.get("escrow_paid"):
+        print(f"[release_job_payment] Job {job_id} has no funded escrow — refusing to release.")
+        return None
 
     cur.execute(
         """UPDATE jobs SET paid_at = NOW()
@@ -135,7 +156,8 @@ def release_job_payment(job, cur):
         return None
 
     worker_id = job["worker_id"]
-    transfer_reference = paystack_payout(job, worker_id, cur)
+    artisan_gets = float(job.get("artisan_gets") or job["amount"] or 0)
+    transfer_reference = paystack_payout(job, worker_id, artisan_gets, cur)
 
     cur.execute(
         """UPDATE jobs SET
@@ -146,9 +168,57 @@ def release_job_payment(job, cur):
     )
 
     cur.execute(
-        """UPDATE users
-           SET jobs_completed = jobs_completed + 1,
-               trust_score    = LEAST(5.0, trust_score + 0.1)
+        "UPDATE users SET jobs_completed = jobs_completed + 1 WHERE id = %s",
+        (worker_id,)
+    )
+
+    return transfer_reference
+
+
+def release_gig_slot_payment(slot, cur):
+    """
+    Same as release_job_payment, but for a single worker's slot on a
+    multi-slot quick gig (job_workers table instead of jobs). Single
+    source of truth for this table — called by: client's
+    review-gig-submission endpoint AND the 24h auto-release scheduler.
+
+    Same safety guarantees as release_job_payment: atomic claim via
+    paid_at, and refuses to release unfunded escrow.
+
+    Returns the transfer_reference on success, or None if already claimed
+    or escrow was never funded.
+    """
+    slot_id = slot["id"]
+
+    if not slot.get("escrow_paid"):
+        print(f"[release_gig_slot_payment] Slot {slot_id} has no funded escrow — refusing to release.")
+        return None
+
+    cur.execute(
+        """UPDATE job_workers SET paid_at = NOW()
+           WHERE id = %s AND status = 'verified' AND paid_at IS NULL""",
+        (slot_id,)
+    )
+    claimed = cur.rowcount == 1
+    if not claimed:
+        return None
+
+    worker_id = slot["worker_id"]
+    artisan_gets = float(slot.get("artisan_gets") or slot["amount"] or 0)
+    transfer_reference = paystack_payout(slot, worker_id, artisan_gets, cur)
+
+    cur.execute(
+        """UPDATE job_workers SET
+           status             = 'paid',
+           transfer_reference = %s
+           WHERE id = %s""",
+        (transfer_reference, slot_id)
+    )
+
+    cur.execute(
+        """UPDATE users SET
+           jobs_completed       = jobs_completed + 1,
+           quick_gigs_completed = quick_gigs_completed + 1
            WHERE id = %s""",
         (worker_id,)
     )
@@ -178,7 +248,7 @@ def _send_email_blocking(email, token, user_name="User", email_type="reset"):
             body_text = "We received a request to reset your SkillChain password. Use the code below to proceed:"
             code_label = token
 
-        elif email_type == "pin_reset":          # ← ADD THIS
+        elif email_type == "pin_reset":
             subject = "SkillChain - Withdrawal PIN Reset Code"
             heading = "Withdrawal PIN Reset"
             body_text = "We received a request to reset your SkillChain withdrawal PIN. Use the code below to proceed:"

@@ -42,19 +42,31 @@ def api_paystack_webhook():
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
+        # ── Check jobs table first ──
         cur.execute(
             """SELECT id, amount, status, escrow_paid, worker_id
                FROM jobs WHERE escrow_reference = %s""",
             (reference,)
         )
         job = cur.fetchone()
+        source = "jobs" if job else None
+
+        # ── Fall back to job_workers (multi-slot quick gigs) ──
+        if not job:
+            cur.execute(
+                """SELECT id, amount, status, escrow_paid, worker_id
+                   FROM job_workers WHERE escrow_reference = %s""",
+                (reference,)
+            )
+            job = cur.fetchone()
+            source = "job_workers" if job else None
 
         if not job:
-            print(f"[webhook] No job found for reference={reference}")
+            print(f"[webhook] No job or job_worker found for reference={reference}")
             return jsonify({"status": "job_not_found"}), 200
 
         if job["escrow_paid"]:
-            print(f"[webhook] Job {job['id']} already marked escrow_paid")
+            print(f"[webhook] {source} {job['id']} already marked escrow_paid")
             return jsonify({"status": "already_paid"}), 200
 
         expected_naira = float(job["amount"])
@@ -62,7 +74,7 @@ def api_paystack_webhook():
         if abs(amount_naira - expected_naira) > 1.0:
             print(f"[webhook] Amount mismatch. Expected ₦{expected_naira} got ₦{amount_naira}")
             cur.execute(
-                "UPDATE jobs SET escrow_amount_received = %s WHERE id = %s",
+                f"UPDATE {source} SET escrow_amount_received = %s WHERE id = %s",
                 (amount_naira, job["id"])
             )
             conn.commit()
@@ -73,7 +85,7 @@ def api_paystack_webhook():
             }), 200
 
         cur.execute(
-            """UPDATE jobs SET
+            f"""UPDATE {source} SET
                escrow_paid            = 1,
                escrow_paid_at         = NOW(),
                escrow_amount_received = %s
@@ -81,9 +93,9 @@ def api_paystack_webhook():
             (amount_naira, job["id"])
         )
         conn.commit()
-        print(f"[webhook] ✅ Job {job['id']} escrow marked paid ₦{amount_naira}")
+        print(f"[webhook] ✅ {source} {job['id']} escrow marked paid ₦{amount_naira}")
 
-        return jsonify({"status": "ok", "job_id": job["id"]}), 200
+        return jsonify({"status": "ok", "id": job["id"], "source": source}), 200
 
     except Exception as e:
         conn.rollback()
@@ -96,35 +108,50 @@ def api_paystack_webhook():
 
 @webhook_bp.route("/dev/simulate-payment", methods=["POST"])
 def api_simulate_payment():
-    """DEV ONLY: Simulate a successful escrow payment without calling Paystack."""
+    """DEV ONLY: Simulate a successful escrow payment without calling Paystack.
+    Accepts either job_id (regular job / single-slot gig) or job_worker_id
+    (multi-slot gig slot)."""
     if os.environ.get("FLASK_ENV") == "production":
         return jsonify({"error": "Not available in production"}), 403
 
-    data = request.get_json(silent=True) or {}
-    job_id = data.get("job_id")
-    if not job_id:
-        return jsonify({"error": "job_id required"}), 400
+    data          = request.get_json(silent=True) or {}
+    job_id        = data.get("job_id")
+    job_worker_id = data.get("job_worker_id")
+
+    if not job_id and not job_worker_id:
+        return jsonify({"error": "job_id or job_worker_id required"}), 400
 
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute("SELECT id, amount, client_pays, escrow_reference FROM jobs WHERE id = %s", (job_id,))
-        job = cur.fetchone()
-        if not job:
-            return jsonify({"error": "Job not found"}), 404
-
-        pay_amount = float(job["client_pays"] or job["amount"])
+        if job_worker_id:
+            table, id_val = "job_workers", job_worker_id
+        else:
+            table, id_val = "jobs", job_id
 
         cur.execute(
-            """UPDATE jobs SET
+            f"SELECT id, amount, client_pays, escrow_reference FROM {table} WHERE id = %s",
+            (id_val,)
+        )
+        row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "Not found"}), 404
+
+        pay_amount = float(row["client_pays"] or row["amount"])
+
+        cur.execute(
+            f"""UPDATE {table} SET
                escrow_paid            = 1,
                escrow_paid_at         = NOW(),
                escrow_amount_received = %s
                WHERE id = %s""",
-            (pay_amount, job_id)
+            (pay_amount, id_val)
         )
         conn.commit()
-        return jsonify({"success": True, "message": f"Job {job_id} escrow simulated as paid ₦{pay_amount:,.2f}"})
+        return jsonify({
+            "success": True,
+            "message": f"{table} {id_val} escrow simulated as paid ₦{pay_amount:,.2f}"
+        })
     finally:
         cur.close()
         conn.close()
