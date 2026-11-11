@@ -1,87 +1,89 @@
+"""Background jobs (run in ONE process - start gunicorn with -w 1 --threads 8):
+ 1. auto-release: credit the artisan's wallet if the client ignored a verified job for 24h
+ 2. payout requery: settle withdrawals Squad left pending/unknown (success or refund)
+ 3. payment reconcile: catch escrow payments whose webhook never arrived
 """
-Background scheduler: auto-releases escrowed payment to the artisan if the
-client hasn't approved/disputed a 'pending_review' job (or gig slot) within
-24 hours.
-
-Uses APScheduler running inside the same process as Flask. This is fine for
-a single-process dev server (e.g. `python main.py` or `flask run`), but if
-you later deploy with multiple worker processes (e.g. gunicorn -w 4), this
-job would run once per worker and could double-pay. In that case, move this
-to a separate one-off process/cron instead of starting it from create_app().
-"""
+import os
 from apscheduler.schedulers.background import BackgroundScheduler
 from database_helper import get_db
-from utils import release_job_payment, release_gig_slot_payment
+import squad_service
+from utils import release_job_payment, release_gig_slot_payment, refund_payout, mark_payout_success
+from routes.webhook import mark_escrow_paid
 
 _scheduler = None
 
 
-def _auto_release_overdue_jobs():
-    """Find jobs (and multi-slot gig slots) stuck past their review_deadline and pay out."""
-    conn = get_db()
-    cur = conn.cursor(dictionary=True)
-    try:
-        # ── Regular jobs / single-slot gigs ──
-        cur.execute(
-            """SELECT * FROM jobs
-               WHERE status = 'verified'
-                 AND paid_at IS NULL
-                 AND review_deadline IS NOT NULL
-                 AND review_deadline <= NOW()"""
-        )
-        overdue_jobs = cur.fetchall()
+def _db_job(fn):
+    def run():
+        conn = get_db()
+        cur = conn.cursor(dictionary=True)
+        try:
+            fn(conn, cur)
+        except Exception as e:
+            conn.rollback()
+            print(f"[scheduler] {fn.__name__} error: {e}")
+        finally:
+            cur.close()
+            conn.close()
+    run.__name__ = fn.__name__
+    return run
 
-        for job in overdue_jobs:
+
+@_db_job
+def auto_release(conn, cur):
+    for table, fn in (("jobs", release_job_payment), ("job_workers", release_gig_slot_payment)):
+        cur.execute(f"""SELECT * FROM {table} WHERE status='verified' AND paid_at IS NULL
+                        AND review_deadline IS NOT NULL AND review_deadline <= NOW()""")
+        for row in cur.fetchall():
             try:
-                ref = release_job_payment(job, cur)
+                ref = fn(row, cur)
                 conn.commit()
-                if ref is None:
-                    print(f"[auto-release] Job {job['id']} already resolved or unfunded — skipped.")
-                else:
-                    print(f"[auto-release] Job {job['id']} auto-paid after 24h (ref={ref})")
+                print(f"[auto-release] {table} {row['id']} -> {ref}")
             except Exception as e:
                 conn.rollback()
-                print(f"[auto-release] Failed for job {job['id']}: {e}")
+                print(f"[auto-release] {table} {row['id']} failed: {e}")
 
-        # ── Multi-slot gig slots ──
-        cur.execute(
-            """SELECT * FROM job_workers
-               WHERE status = 'verified'
-                 AND paid_at IS NULL
-                 AND review_deadline IS NOT NULL
-                 AND review_deadline <= NOW()"""
-        )
-        overdue_slots = cur.fetchall()
 
-        for slot in overdue_slots:
-            try:
-                ref = release_gig_slot_payment(slot, cur)
-                conn.commit()
-                if ref is None:
-                    print(f"[auto-release] Slot {slot['id']} already resolved or unfunded — skipped.")
-                else:
-                    print(f"[auto-release] Slot {slot['id']} auto-paid after 24h (ref={ref})")
-            except Exception as e:
-                conn.rollback()
-                print(f"[auto-release] Failed for slot {slot['id']}: {e}")
+@_db_job
+def requery_payouts(conn, cur):
+    cur.execute("""SELECT id, reference, created_at FROM payouts
+                   WHERE status IN ('processing','pending') AND created_at <= NOW() - INTERVAL 1 MINUTE
+                   ORDER BY id LIMIT 50""")
+    for p in cur.fetchall():
+        r = squad_service.requery_transfer(p["reference"])
+        if r["state"] == "success":
+            mark_payout_success(cur, p["id"], r["message"])
+        elif r["state"] == "failed":
+            refund_payout(cur, p["id"], r["message"])
+        else:
+            cur.execute("""UPDATE payouts SET status='needs_review', updated_at=NOW()
+                           WHERE id=%s AND created_at <= NOW() - INTERVAL 2 HOUR""", (p["id"],))
+            if cur.rowcount:
+                print(f"[payout] #{p['id']} needs manual review in the Squad dashboard (ref {p['reference']})")
+        conn.commit()
 
-    except Exception as e:
-        print(f"[auto-release] Query error: {e}")
-    finally:
-        cur.close()
-        conn.close()
+
+@_db_job
+def reconcile_payments(conn, cur):
+    for table in ("jobs", "job_workers"):
+        cur.execute(f"""SELECT escrow_reference FROM {table}
+                        WHERE escrow_paid=0 AND escrow_reference IS NOT NULL
+                        ORDER BY id DESC LIMIT 40""")
+        for row in cur.fetchall():
+            v = squad_service.verify_payment(row["escrow_reference"])
+            if v["ok"] and v["paid"]:
+                print(f"[reconcile] {row['escrow_reference']} -> {mark_escrow_paid(conn, cur, row['escrow_reference'], v['amount_kobo'] or 0)}")
 
 
 def start_scheduler():
-    """Call this once from create_app(). Safe to call multiple times (no-op after first)."""
     global _scheduler
-    if _scheduler is not None:
+    if _scheduler is not None or os.getenv("RUN_SCHEDULER", "1") != "1":
         return _scheduler
-
     _scheduler = BackgroundScheduler(daemon=True)
-    # Check every 10 minutes — frequent enough that nothing waits much past 24h,
-    # cheap enough not to hammer the DB.
-    _scheduler.add_job(_auto_release_overdue_jobs, "interval", minutes=10, id="auto_release_overdue_jobs")
+    kw = dict(max_instances=1, coalesce=True)
+    _scheduler.add_job(auto_release,        "interval", minutes=10, id="auto_release", **kw)
+    _scheduler.add_job(requery_payouts,     "interval", minutes=2,  id="requery_payouts", **kw)
+    _scheduler.add_job(reconcile_payments,  "interval", minutes=5,  id="reconcile_payments", **kw)
     _scheduler.start()
-    print("[scheduler] Auto-release scheduler started (checks every 10 min)")
+    print("[scheduler] started")
     return _scheduler

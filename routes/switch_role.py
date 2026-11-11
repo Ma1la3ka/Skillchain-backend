@@ -1,11 +1,12 @@
 """Role switching routes — lets a user toggle between artisan and client context"""
-from flask import Blueprint, request, jsonify, session
+from flask import Blueprint, request, jsonify
+from config import FRONTEND_URL
 from database_helper import get_db
 
 switch_bp = Blueprint('switch', __name__, url_prefix='/api')
 
-WORKER_DASHBOARD = "https://skillchain-frontend-omega.vercel.app//Worker_dashboard/index.html"
-CLIENT_DASHBOARD = "https://skillchain-frontend-omega.vercel.app//Client_dashboard/index.html"
+WORKER_DASHBOARD = FRONTEND_URL + "/worker_dashboard/index.html"
+CLIENT_DASHBOARD = FRONTEND_URL + "/client_dashboard/index.html"
 
 
 @switch_bp.route("/switch-role/status", methods=["GET"])
@@ -83,7 +84,6 @@ def activate_client():
                 (user_id,)
             )
         conn.commit()
-        session["active_role"] = "client"
 
         return jsonify({
             "success":   True,
@@ -143,7 +143,6 @@ def activate_worker():
             (trade, 1 if has_client else user["has_client_profile"], user_id)
         )
         conn.commit()
-        session["active_role"] = "worker"
 
         return jsonify({
             "success":   True,
@@ -204,7 +203,6 @@ def switch_role():
             (target, user_id)
         )
         conn.commit()
-        session["active_role"] = target
 
         redirect_url = CLIENT_DASHBOARD if target == "client" else WORKER_DASHBOARD
 

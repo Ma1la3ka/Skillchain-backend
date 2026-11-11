@@ -1,10 +1,11 @@
-"""Utility functions for SkillChain Backend"""
+"""Utility functions for SkillChain Backend: geo, wallet/escrow money logic, email."""
 import math
 import uuid
-import os
-import requests as req
-from paystack_service import initialize_transaction, create_transfer_recipient, initiate_transfer
+from decimal import Decimal, ROUND_HALF_UP
 from threading import Thread
+import requests as req
+from config import FRONTEND_URL, RESEND_API_KEY as CONFIG_RESEND_API_KEY
+import squad_service
 
 
 def haversine_distance(lat1, lng1, lat2, lng2):
@@ -18,219 +19,95 @@ def haversine_distance(lat1, lng1, lat2, lng2):
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def create_virtual_account(user_id, name, email, phone):
-    """
-    NOTE: Paystack doesn't need a per-worker virtual account for this app's
-    flow — payouts go straight to the worker's bank account via Transfer,
-    and escrow collection uses a single Checkout link per job, not a
-    dedicated account per worker. This function is kept ONLY so existing
-    call sites don't break on a missing import. It's a no-op stub.
-    """
-    return {
-        "account_number": None,
-        "bank_name": None,
-        "customer_id": f"worker_{user_id}"
-    }
+def money(x):
+    """Exact 2-decimal Decimal from any number/string."""
+    return Decimal(str(x or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def paystack_create_collection_account(job_id: int, amount: float, email: str) -> dict:
-    """Create a Paystack Checkout link for a client to fund a job's escrow."""
-    reference = f"job_{job_id}_{uuid.uuid4().hex[:8]}"
-    callback_url = "https://skillchain-frontend-omega.vercel.app//Client_dashboard/index.html"
-
-    result = initialize_transaction(
-        email=email,
-        amount_naira=amount,
-        reference=reference,
-        callback_url=callback_url,
-        metadata={"job_id": job_id}
+# ── Collection (client funds escrow via Squad checkout) ─────────────────────
+def create_collection_link(ref_id, amount, email, name=None):
+    """Returns {} on failure. Keys kept compatible with the columns client.py already writes."""
+    reference = f"{ref_id}_{uuid.uuid4().hex[:10]}"
+    result = squad_service.initialize_payment(
+        email=email, amount_naira=amount, reference=reference,
+        callback_url=f"{FRONTEND_URL}/client_dashboard/index.html",
+        customer_name=name, metadata={"ref": str(ref_id)},
     )
-
-    print(f"\n{'='*50}")
-    print(f"[Paystack] initialize_transaction response: {result}")
-    print(f"{'='*50}\n")
-
-    if result.get("status") and result.get("data"):
-        checkout_url = result["data"].get("authorization_url", "")
-        return {
-            "account_number": checkout_url,
-            "bank_name": "Paystack",
-            "bank_code": "paystack",
-            "reference": reference,
-            "checkout_url": checkout_url
-        }
-    else:
-        print(f"[Paystack] initialize_transaction FAILED: {result.get('message', 'No message')}")
-
-    return {}
+    if not result["ok"]:
+        print(f"[squad] initialize_payment failed: {result['message']}")
+        return {}
+    return {"account_number": result["checkout_url"], "bank_name": "Squad", "bank_code": "squad",
+            "reference": reference, "checkout_url": result["checkout_url"]}
 
 
-def paystack_payout(job, worker_id, payout_amount, cur):
-    """Transfer the given amount to the worker's bank account via Paystack.
+# ── Wallet ledger (caller owns the transaction: commit/rollback) ────────────
+def credit_wallet(cur, user_id, amount, reference, note):
+    amount = money(amount)
+    cur.execute("UPDATE users SET escrow_balance = ROUND(COALESCE(escrow_balance,0) + %s, 2) WHERE id = %s",
+                (str(amount), user_id))
+    cur.execute("""INSERT INTO wallet_ledger (user_id, direction, amount, reference, note)
+                   VALUES (%s, 'credit', %s, %s, %s)""", (user_id, str(amount), reference, note))
 
-    `job` may be a row from either `jobs` or `job_workers` — only `job['id']`
-    is used here (for the transfer reference/reason text), so both shapes work.
-    `payout_amount` must already be the fee-adjusted amount (artisan_gets),
-    resolved by the caller — this function never recomputes it from job['amount'].
-    """
+
+def _release(table, row, cur, extra_user_sql):
+    """Atomically mark a funded, verified job/slot paid and credit the worker's wallet.
+    Returns a reference string, or None if unfunded / already released."""
+    rid = row["id"]
+    if not row.get("escrow_paid"):
+        print(f"[release] {table} {rid} has no funded escrow - refusing.")
+        return None
+    ref = f"wallet_{table}_{rid}"
     cur.execute(
-        """SELECT bank_account_no, bank_code, bank_account_name, name,
-                  paystack_recipient_code
-           FROM users WHERE id = %s""",
-        (worker_id,)
-    )
-    worker = cur.fetchone()
-
-    if not worker or not worker["bank_account_no"] or not worker["bank_code"]:
-        print(f"[payout] Worker {worker_id} has no bank details on file — using fallback ref")
-        return f"manual_{uuid.uuid4().hex[:10]}"
-
-    recipient_code = worker.get("paystack_recipient_code")
-
-    if not recipient_code:
-        rec_result = create_transfer_recipient(
-            name=worker["bank_account_name"] or worker["name"],
-            account_number=worker["bank_account_no"],
-            bank_code=worker["bank_code"]
-        )
-        print(f"[payout] create_transfer_recipient response: {rec_result}")
-
-        if rec_result.get("status") and rec_result.get("data"):
-            recipient_code = rec_result["data"]["recipient_code"]
-            cur.execute(
-                "UPDATE users SET paystack_recipient_code = %s WHERE id = %s",
-                (recipient_code, worker_id)
-            )
-        else:
-            print(f"[payout] Could not create recipient: {rec_result.get('message')}")
-            return f"manual_{uuid.uuid4().hex[:10]}"
-
-    reference = f"pay_{job['id']}_{uuid.uuid4().hex[:8]}"
-
-    transfer_result = initiate_transfer(
-        amount_naira=payout_amount,
-        recipient_code=recipient_code,
-        reference=reference,
-        reason=f"SkillChain payment for job #{job['id']}"
-    )
-    print(f"[payout] initiate_transfer response: {transfer_result}")
-
-    return reference
+        f"""UPDATE {table} SET status='paid', paid_at=NOW(), transfer_reference=%s
+            WHERE id=%s AND status='verified' AND paid_at IS NULL AND escrow_paid=1""",
+        (ref, rid))
+    if cur.rowcount != 1:
+        return None
+    cur.execute(f"SELECT worker_id, artisan_gets, amount FROM {table} WHERE id=%s", (rid,))
+    r = cur.fetchone()
+    gets = money(r["artisan_gets"] or r["amount"])
+    credit_wallet(cur, r["worker_id"], gets, ref, f"Payment for {table[:-1] if table == 'jobs' else 'slot'} #{rid}")
+    cur.execute(f"UPDATE users SET jobs_completed = jobs_completed + 1{extra_user_sql} WHERE id = %s", (r["worker_id"],))
+    return ref
 
 
 def release_job_payment(job, cur):
-    """
-    Pay out escrowed funds to the worker and finalize a *regular job* (or
-    single-slot gig) as 'paid'. Single source of truth for this table —
-    called by: client approval endpoint (review-job) AND the 24h
-    auto-release scheduler. Do not duplicate this logic elsewhere.
-
-    SAFE AGAINST DOUBLE-PAYOUT: claims the job atomically first by flipping
-    the existing `paid_at` column from NULL to NOW() in one conditional
-    UPDATE. Only one caller can win that race; the loser backs off cleanly.
-
-    SAFE AGAINST UNFUNDED PAYOUT: refuses to release if escrow_paid is not
-    set — this can happen if a worker submits proof before the client ever
-    funds escrow, and 24h passes with no client action.
-
-    Trust score is NOT bumped here — it's derived solely from client_rating
-    averages in api_rate_worker, so a job paid without a rating (e.g. via
-    24h auto-release) doesn't inflate the score with no real signal behind it.
-
-    Returns the transfer_reference on success, or None if already claimed
-    or escrow was never funded.
-    """
-    job_id = job["id"]
-
-    if not job.get("escrow_paid"):
-        print(f"[release_job_payment] Job {job_id} has no funded escrow — refusing to release.")
-        return None
-
-    cur.execute(
-        """UPDATE jobs SET paid_at = NOW()
-           WHERE id = %s AND status = 'verified' AND paid_at IS NULL""",
-        (job_id,)
-    )
-    claimed = cur.rowcount == 1
-    if not claimed:
-        return None
-
-    worker_id = job["worker_id"]
-    artisan_gets = float(job.get("artisan_gets") or job["amount"] or 0)
-    transfer_reference = paystack_payout(job, worker_id, artisan_gets, cur)
-
-    cur.execute(
-        """UPDATE jobs SET
-           status             = 'paid',
-           transfer_reference = %s
-           WHERE id = %s""",
-        (transfer_reference, job_id)
-    )
-
-    cur.execute(
-        "UPDATE users SET jobs_completed = jobs_completed + 1 WHERE id = %s",
-        (worker_id,)
-    )
-
-    return transfer_reference
+    """Client approval or 24h auto-release: credit the artisan's wallet. The artisan then
+    withdraws to their bank with a PIN. Idempotent via the conditional UPDATE."""
+    return _release("jobs", job, cur, "")
 
 
 def release_gig_slot_payment(slot, cur):
-    """
-    Same as release_job_payment, but for a single worker's slot on a
-    multi-slot quick gig (job_workers table instead of jobs). Single
-    source of truth for this table — called by: client's
-    review-gig-submission endpoint AND the 24h auto-release scheduler.
+    # Quick gigs are removed from the apps; kept only until those backend routes are deleted.
+    return _release("job_workers", slot, cur, ", quick_gigs_completed = quick_gigs_completed + 1")
 
-    Same safety guarantees as release_job_payment: atomic claim via
-    paid_at, and refuses to release unfunded escrow.
 
-    Returns the transfer_reference on success, or None if already claimed
-    or escrow was never funded.
-    """
-    slot_id = slot["id"]
+# ── Payout state changes (caller commits) ───────────────────────────────────
+def refund_payout(cur, payout_id, message=""):
+    """Failed payout -> money goes back to the wallet. Safe to call twice (status guard)."""
+    cur.execute("UPDATE payouts SET status='failed', provider_message=%s, updated_at=NOW() "
+                "WHERE id=%s AND status IN ('processing','pending')", (message[:250], payout_id))
+    if cur.rowcount != 1:
+        return False
+    cur.execute("SELECT user_id, amount FROM payouts WHERE id=%s", (payout_id,))
+    p = cur.fetchone()
+    credit_wallet(cur, p["user_id"], p["amount"], f"payout_{payout_id}_refund", "Withdrawal failed - refunded")
+    cur.execute("UPDATE users SET total_withdrawn = GREATEST(0, ROUND(COALESCE(total_withdrawn,0) - %s, 2)) WHERE id=%s",
+                (str(money(p["amount"])), p["user_id"]))
+    return True
 
-    if not slot.get("escrow_paid"):
-        print(f"[release_gig_slot_payment] Slot {slot_id} has no funded escrow — refusing to release.")
-        return None
 
-    cur.execute(
-        """UPDATE job_workers SET paid_at = NOW()
-           WHERE id = %s AND status = 'verified' AND paid_at IS NULL""",
-        (slot_id,)
-    )
-    claimed = cur.rowcount == 1
-    if not claimed:
-        return None
-
-    worker_id = slot["worker_id"]
-    artisan_gets = float(slot.get("artisan_gets") or slot["amount"] or 0)
-    transfer_reference = paystack_payout(slot, worker_id, artisan_gets, cur)
-
-    cur.execute(
-        """UPDATE job_workers SET
-           status             = 'paid',
-           transfer_reference = %s
-           WHERE id = %s""",
-        (transfer_reference, slot_id)
-    )
-
-    cur.execute(
-        """UPDATE users SET
-           jobs_completed       = jobs_completed + 1,
-           quick_gigs_completed = quick_gigs_completed + 1
-           WHERE id = %s""",
-        (worker_id,)
-    )
-
-    return transfer_reference
+def mark_payout_success(cur, payout_id, message=""):
+    cur.execute("UPDATE payouts SET status='success', provider_message=%s, updated_at=NOW() "
+                "WHERE id=%s AND status IN ('processing','pending')", (message[:250], payout_id))
+    return cur.rowcount == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # RESEND EMAIL (verified domain: hamzlabs.com)
 # ─────────────────────────────────────────────────────────────────────────────
 
-RESEND_API_KEY = os.getenv("RESEND_API_KEY")
+RESEND_API_KEY = CONFIG_RESEND_API_KEY
 SENDER_EMAIL = "hello@hamzlabs.com"
 SENDER_NAME = "SkillChain"
 
@@ -276,7 +153,7 @@ def _send_email_blocking(email, token, user_name="User", email_type="reset"):
                     <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
                     <p style="color: #999; font-size: 12px; text-align: center;">
                         SkillChain by Hamz Labs<br>
-                        <a href="https://skillchain-frontend-omega.vercel.app" style="color: #FF4D2E;">Visit SkillChain</a>
+                        <a href="{FRONTEND_URL}" style="color: #FF4D2E;">Visit SkillChain</a>
                     </p>
                 </div>
             </body>

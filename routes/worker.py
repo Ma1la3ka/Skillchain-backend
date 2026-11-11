@@ -1,5 +1,5 @@
 """Worker-related routes"""
-from flask import Blueprint, request, jsonify
+from flask import Blueprint, request, jsonify, g
 from database_helper import get_db
 from utils import haversine_distance
 import uuid
@@ -8,7 +8,11 @@ import cloudinary
 import cloudinary.uploader
 from datetime import datetime, timedelta
 import random
-from utils import send_pin_reset_email
+from utils import send_pin_reset_email, refund_payout, mark_payout_success
+import secrets
+import squad_service
+from decimal import Decimal, InvalidOperation
+from config import MIN_WITHDRAWAL, MAX_WITHDRAWAL
 worker_bp = Blueprint('worker', __name__, url_prefix='/api/worker')
 
 # UPDATE the upload-avatar route:
@@ -605,105 +609,114 @@ def api_update_profile():
         conn.close()
 @worker_bp.route("/withdraw", methods=["POST"])
 def api_worker_withdraw():
-    """Worker withdraws balance to their bank account"""
+    """Withdraw wallet balance to the worker's bank via Squad.
+
+    Order matters for safety: (1) PIN check under a row lock, (2) the account name comes from
+    Squad's lookup, never from the client, (3) the wallet is debited atomically and a payout row
+    is committed BEFORE any money moves, (4) failed transfers are refunded; unclear ones stay
+    'processing' and the scheduler settles them with Squad's requery."""
     data = request.get_json(silent=True) or {}
-    user_id = str(data.get("user_id", "")).strip()
-    amount = data.get("amount")
-    bank_code = data.get("bank_code", "").strip()
-    account_no = data.get("account_no", "").strip()
-    account_name = data.get("account_name", "").strip()
+    user_id = str(g.uid)
+    bank_code = str(data.get("bank_code", "")).strip()
+    account_no = str(data.get("account_no", "")).strip()
     pin = str(data.get("pin", "")).strip()
 
-    if not all([user_id, amount, bank_code, account_no, pin]):
+    if not (bank_code and account_no and pin and data.get("amount") is not None):
         return jsonify({"success": False, "message": "All fields, including your withdrawal PIN, are required."}), 400
-
-    bank_code = bank_code.zfill(6)
-
     try:
-        amount = float(amount)
-        if amount < 100:
-            return jsonify({"success": False, "message": "Minimum withdrawal is ₦100."}), 400
-    except (ValueError, TypeError):
+        amount = Decimal(str(data.get("amount"))).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError):
         return jsonify({"success": False, "message": "Invalid amount."}), 400
+    if amount < MIN_WITHDRAWAL:
+        return jsonify({"success": False, "message": f"Minimum withdrawal is ₦{MIN_WITHDRAWAL:,.0f}."}), 400
+    if amount > MAX_WITHDRAWAL:
+        return jsonify({"success": False, "message": f"Maximum per withdrawal is ₦{MAX_WITHDRAWAL:,.0f}."}), 400
+    if bank_code not in squad_service.BANK_BY_CODE or len(account_no) != 10 or not account_no.isdigit():
+        return jsonify({"success": False, "message": "Invalid bank details."}), 400
 
     conn = get_db()
     cur = conn.cursor(dictionary=True)
     try:
-        cur.execute(
-            "SELECT name, withdrawal_pin_hash, pin_failed_attempts, pin_locked_until FROM users WHERE id = %s",
-            (user_id,)
-        )
+        cur.execute("SELECT name, withdrawal_pin_hash, pin_failed_attempts, pin_locked_until "
+                    "FROM users WHERE id = %s FOR UPDATE", (user_id,))
         worker = cur.fetchone()
         if not worker:
+            conn.rollback()
             return jsonify({"success": False, "message": "Worker not found."}), 404
         if not worker["withdrawal_pin_hash"]:
+            conn.rollback()
             return jsonify({"success": False, "message": "Set a withdrawal PIN first.", "needs_pin_setup": True}), 403
-
-        # ── Lockout check ──
         if worker["pin_locked_until"] and datetime.now() < worker["pin_locked_until"]:
             remaining = int((worker["pin_locked_until"] - datetime.now()).total_seconds() / 60) + 1
-            return jsonify({
-                "success": False,
-                "locked": True,
-                "message": f"Too many wrong PIN attempts. Try again in {remaining} minute(s), or reset your PIN."
-            }), 403
+            conn.rollback()
+            return jsonify({"success": False, "locked": True,
+                            "message": f"Too many wrong PIN attempts. Try again in {remaining} minute(s), or reset your PIN."}), 403
 
-        # ── PIN check ──
         if not check_password_hash(worker["withdrawal_pin_hash"], pin):
             attempts = (worker["pin_failed_attempts"] or 0) + 1
             if attempts >= 3:
-                cur.execute(
-                    "UPDATE users SET pin_failed_attempts=0, pin_locked_until=%s WHERE id=%s",
-                    (datetime.now() + timedelta(hours=1), user_id)
-                )
+                cur.execute("UPDATE users SET pin_failed_attempts=0, pin_locked_until=%s WHERE id=%s",
+                            (datetime.now() + timedelta(hours=1), user_id))
                 conn.commit()
-                return jsonify({
-                    "success": False, "locked": True,
-                    "message": "Too many wrong attempts. Withdrawals are locked for 1 hour."
-                }), 403
-            else:
-                cur.execute("UPDATE users SET pin_failed_attempts=%s WHERE id=%s", (attempts, user_id))
-                conn.commit()
-                return jsonify({
-                    "success": False,
-                    "message": f"Incorrect PIN. {3 - attempts} attempt(s) left before a 1-hour lock."
-                }), 403
-
-        # ── Correct PIN — reset counter ──
+                return jsonify({"success": False, "locked": True,
+                                "message": "Too many wrong attempts. Withdrawals are locked for 1 hour."}), 403
+            cur.execute("UPDATE users SET pin_failed_attempts=%s WHERE id=%s", (attempts, user_id))
+            conn.commit()
+            return jsonify({"success": False,
+                            "message": f"Incorrect PIN. {3 - attempts} attempt(s) left before a 1-hour lock."}), 403
         cur.execute("UPDATE users SET pin_failed_attempts=0, pin_locked_until=NULL WHERE id=%s", (user_id,))
         conn.commit()
 
-        cur.execute(
-            "UPDATE users SET bank_code = %s, bank_account_no = %s WHERE id = %s",
-            (bank_code, account_no, user_id)
-        )
+        look = squad_service.lookup_account(bank_code, account_no)
+        if not look["ok"]:
+            return jsonify({"success": False, "message": look["message"] or "Could not verify this bank account."}), 400
+        account_name = look["account_name"]
+        bank_name = squad_service.BANK_BY_CODE[bank_code]
+
+        # Atomic debit: the WHERE clause makes a double-spend impossible
+        cur.execute("""UPDATE users SET escrow_balance = ROUND(escrow_balance - %s, 2),
+                              total_withdrawn = ROUND(COALESCE(total_withdrawn,0) + %s, 2)
+                       WHERE id = %s AND ROUND(escrow_balance, 2) >= %s""",
+                    (str(amount), str(amount), user_id, str(amount)))
+        if cur.rowcount != 1:
+            conn.rollback()
+            return jsonify({"success": False, "message": "Insufficient balance."}), 400
+        cur.execute("""INSERT INTO payouts (user_id, amount, bank_code, bank_name, account_no, account_name, status)
+                       VALUES (%s,%s,%s,%s,%s,%s,'processing')""",
+                    (user_id, str(amount), bank_code, bank_name, account_no, account_name))
+        payout_id = cur.lastrowid
+        reference = squad_service.full_reference(f"wd{payout_id}")
+        cur.execute("UPDATE payouts SET reference=%s WHERE id=%s", (reference, payout_id))
+        cur.execute("""INSERT INTO wallet_ledger (user_id, direction, amount, reference, note)
+                       VALUES (%s,'debit',%s,%s,%s)""",
+                    (user_id, str(amount), f"payout_{payout_id}", f"Withdrawal to {bank_name}"))
+        cur.execute("UPDATE users SET bank_code=%s, bank_account_no=%s, bank_name=%s, bank_account_name=%s WHERE id=%s",
+                    (bank_code, account_no, bank_name, account_name, user_id))
         conn.commit()
 
-        reference = f"withdraw_{user_id}_{uuid.uuid4().hex[:8]}"
-
-        cur.execute(
-            "UPDATE users SET total_withdrawn = COALESCE(total_withdrawn, 0) + %s, escrow_balance = GREATEST(0, escrow_balance - %s) WHERE id = %s",
-            (amount, amount, user_id)
-        )
-        conn.commit()
-
-        return jsonify({
-            "success": True,
-            "reference": reference,
-            "message": f"₦{amount:,.0f} withdrawal initiated! Arrives in 1–5 minutes."
-        })
-
+        result = squad_service.transfer(f"wd{payout_id}", amount, bank_code, account_no, account_name)
+        if result["state"] == "success":
+            mark_payout_success(cur, payout_id, result["message"])
+            conn.commit()
+            return jsonify({"success": True, "reference": reference, "status": "success",
+                            "message": f"₦{amount:,.0f} sent to {bank_name}."})
+        if result["state"] == "failed":
+            refund_payout(cur, payout_id, result["message"])
+            conn.commit()
+            print(f"[withdraw] payout {payout_id} failed at Squad: {result['message']}")
+            return jsonify({"success": False,
+                            "message": "Withdrawal could not be completed right now. Your balance was not charged."}), 502
+        # unknown: Squad may or may not have sent it. Leave 'processing'; the scheduler settles it.
+        return jsonify({"success": True, "reference": reference, "status": "processing",
+                        "message": f"₦{amount:,.0f} withdrawal is processing. It will arrive shortly."})
     except Exception as e:
         conn.rollback()
         print(f"[withdraw error] {e}")
-        return jsonify({
-            "success": True,
-            "reference": f"withdraw_{user_id}_demo",
-            "message": f"₦{amount:,.0f} withdrawal initiated! Arrives in 1–5 minutes."
-        })
+        return jsonify({"success": False, "message": "Withdrawal failed. Please try again."}), 500
     finally:
         cur.close()
         conn.close()
+
 
 @worker_bp.route("/my-bargains")
 def api_worker_my_bargains():
@@ -763,6 +776,9 @@ def api_worker_public_profile():
             WHERE u.id = %s AND (u.role = 'worker' OR u.active_role = 'worker')
         """, (worker_id,))
         worker = cur.fetchone()
+        if worker and not getattr(g, "uid", None):
+            for k in ("phone", "shop_lat", "shop_lng", "shop_address"):
+                worker[k] = None
         if not worker:
             return jsonify({"error": "Worker not found"}), 404
         worker["shop_lat"] = float(worker["shop_lat"]) if worker["shop_lat"] else None
@@ -1028,7 +1044,7 @@ def api_forgot_pin():
         if not user:
             return jsonify({"success": True, "message": "If that email exists, a reset code has been sent."})
 
-        token  = str(random.randint(100000, 999999))
+        token  = str(secrets.randbelow(900000) + 100000)
         expiry = datetime.now() + timedelta(minutes=10)
         cur.execute(
             "INSERT INTO pin_reset_tokens (user_id, token, expires_at) VALUES (%s,%s,%s)",

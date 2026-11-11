@@ -1,3 +1,4 @@
+import os
 import mysql.connector
 
 def init_db():
@@ -5,7 +6,7 @@ def init_db():
         conn = mysql.connector.connect(
             host="localhost",
             user="root",
-            password="Ola01/2007"
+            password=os.getenv("DB_PASSWORD", "")
         )
         c = conn.cursor()
 

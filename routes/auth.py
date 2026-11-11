@@ -1,22 +1,22 @@
 """Authentication routes"""
-from flask import Blueprint, request, render_template, session, redirect, url_for, jsonify
+from flask import Blueprint, request, render_template, jsonify, g
+import secrets
+from security import issue_token
+from config import FRONTEND_URL
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
-import random
 from database_helper import get_db
 from utils import send_reset_email
 from utils import send_reset_email, send_verification_email
 auth_bp = Blueprint('auth', __name__)
 
-WORKER_DASHBOARD = "https://skillchain-frontend-omega.vercel.app//Worker_dashboard/index.html"
-CLIENT_DASHBOARD = "https://skillchain-frontend-omega.vercel.app//Client_dashboard/index.html"
+WORKER_DASHBOARD = FRONTEND_URL + "/worker_dashboard/index.html"
+CLIENT_DASHBOARD = FRONTEND_URL + "/client_dashboard/index.html"
 
 
 @auth_bp.route("/", methods=["GET"])
 def index():
-    if "user_id" in session:
-        return redirect(url_for("dashboard"))
-    return redirect(url_for("auth.login"))
+    return jsonify({"service": "skillchain-api"})
 
 
 @auth_bp.route("/login", methods=["POST"])
@@ -57,9 +57,7 @@ def login():
     has_client_profile = bool(user.get("has_client_profile", 0))
     last_active_role   = user.get("active_role") or primary_role
 
-    session["user_id"]     = user["id"]
-    session["role"]        = primary_role
-    session["active_role"] = last_active_role
+    token = issue_token(user["id"])
 
     base_user = {
         "id":                 user["id"],
@@ -76,6 +74,7 @@ def login():
             "success":  True,
             "redirect": CLIENT_DASHBOARD,
             "user":     base_user,
+        "token":    token,
             "pick_role": False,
         })
 
@@ -85,6 +84,7 @@ def login():
             "success":  True,
             "redirect": WORKER_DASHBOARD,
             "user":     base_user,
+        "token":    token,
             "pick_role": False,
         })
 
@@ -100,6 +100,7 @@ def login():
         "success":         True,
         "redirect":        fallback_redirect,
         "user":            base_user,
+        "token":           token,
         "pick_role":       True,   # ← frontend shows picker
         "last_active_role": last_active_role,
         "worker_url":      WORKER_DASHBOARD,
@@ -142,7 +143,7 @@ def register():
                             "errors": {"email": "This email is already registered."}}), 409
 
         pw_hash = generate_password_hash(password)
-        code    = str(random.randint(100000, 999999))
+        code    = str(secrets.randbelow(900000) + 100000)
         expiry  = datetime.now() + timedelta(minutes=10)
 
         cur.execute(
@@ -196,7 +197,7 @@ def verify_email():
 
         if user["email_verified"]:
             return jsonify({"success": True, "message": "Already verified.", "redirect":
-                             "https://skillchain-frontend-omega.vercel.app//Login/index.html"})
+                             FRONTEND_URL + "/login/index.html"})
 
         if not user["email_verify_code"] or datetime.now() > user["email_verify_expires"]:
             return jsonify({"success": False, "message": "Code expired. Request a new one."}), 400
@@ -214,7 +215,7 @@ def verify_email():
         return jsonify({
             "success":  True,
             "message":  "Email verified! You can now log in.",
-            "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html"
+            "redirect": FRONTEND_URL + "/login/index.html"
         })
     except Exception as e:
         conn.rollback()
@@ -242,7 +243,7 @@ def resend_verification():
         if user["email_verified"]:
             return jsonify({"success": True, "message": "Already verified — you can log in."})
 
-        code   = str(random.randint(100000, 999999))
+        code   = str(secrets.randbelow(900000) + 100000)
         expiry = datetime.now() + timedelta(minutes=10)
         cur.execute(
             "UPDATE users SET email_verify_code = %s, email_verify_expires = %s WHERE id = %s",
@@ -260,7 +261,7 @@ def resend_verification():
 
 @auth_bp.route("/api/me")
 def api_me():
-    if "user_id" not in session:
+    if not getattr(g, "uid", None):
         return jsonify({"error": "Not logged in"}), 401
 
     conn = get_db()
@@ -269,7 +270,7 @@ def api_me():
         """SELECT id, name, email, role, active_role, has_client_profile,
                   trust_score, jobs_completed
            FROM users WHERE id = %s""",
-        (session["user_id"],)
+        (g.uid,)
     )
     user = cur.fetchone()
     cur.close()
@@ -282,24 +283,9 @@ def api_me():
     return jsonify(user)
 
 
-@auth_bp.route("/dashboard")
-def dashboard():
-    if "user_id" not in session:
-        return redirect(url_for("auth.login"))
-    role = session.get("active_role") or session.get("role", "worker")
-    return redirect(WORKER_DASHBOARD if role == "worker" else CLIENT_DASHBOARD)
-
-
 @auth_bp.route("/logout-api", methods=["POST"])
 def logout_api():
-    session.clear()
-    return jsonify({"success": True})
-
-
-@auth_bp.route("/logout")
-def logout():
-    session.clear()
-    return redirect(url_for("auth.login"))
+    return jsonify({"success": True})   # token is cleared client-side
 
 
 @auth_bp.route("/forgot-password", methods=["GET", "POST"])
@@ -322,7 +308,7 @@ def forgot_password():
             return jsonify({"success": True,
                             "message": "If that email exists, a reset code has been sent."})
 
-        token  = str(random.randint(100000, 999999))
+        token  = str(secrets.randbelow(900000) + 100000)
         expiry = datetime.now() + timedelta(minutes=10)
         cur.execute(
             "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES (%s,%s,%s)",
@@ -364,7 +350,7 @@ def reset_password():
         cur.execute("UPDATE password_reset_tokens SET used=1 WHERE id=%s", (record["id"],))
         conn.commit()
         return jsonify({"success": True,
-                        "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html"})
+                        "redirect": FRONTEND_URL + "/login/index.html"})
     except Exception as e:
         print(f"[reset-password error] {e}")
         return jsonify({"success": False, "message": "Server error."}), 500
@@ -400,7 +386,7 @@ def reset_password_final():
         cur.execute("UPDATE password_reset_tokens SET used=1 WHERE id=%s", (record["id"],))
         conn.commit()
         return jsonify({"success": True,
-                        "redirect": "https://skillchain-frontend-omega.vercel.app//Login/index.html"})
+                        "redirect": FRONTEND_URL + "/login/index.html"})
     except Exception as e:
         print(f"[reset-password-final error] {e}")
         return jsonify({"success": False, "message": "Server error."}), 500

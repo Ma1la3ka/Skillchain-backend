@@ -1,25 +1,45 @@
-"""Configuration module for SkillChain Backend"""
+"""Configuration for SkillChain backend. Everything secret comes from environment variables."""
 import os
+from decimal import Decimal
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Environment
 ENV = os.getenv("FLASK_ENV", "development")
+IS_PROD = ENV == "production"
 
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    if IS_PROD:
+        raise RuntimeError("SECRET_KEY must be set in production.")
+    SECRET_KEY = "dev-only-secret-do-not-use-in-production"
 
-# Module-level configuration variables
-SECRET_KEY = os.getenv("SECRET_KEY", "skillchain-secret-key-change-in-production")
-DEBUG = os.getenv("FLASK_DEBUG", "True").lower() == "true" if ENV == "development" else False
+DEBUG = (not IS_PROD) and os.getenv("FLASK_DEBUG", "false").lower() == "true"
+TOKEN_TTL_DAYS = int(os.getenv("TOKEN_TTL_DAYS", "14"))
 
-# Paystack API configuration
-PAYSTACK_SECRET_KEY = os.getenv("PAYSTACK_SECRET_KEY", "")
-PAYSTACK_PUBLIC_KEY = os.getenv("PAYSTACK_PUBLIC_KEY", "")
-PAYSTACK_BASE_URL   = "https://api.paystack.co"
+# ── Squad (payments + payouts) ──────────────────────────────────────────────
+SQUAD_SECRET_KEY  = os.getenv("SQUAD_SECRET_KEY", "")
+SQUAD_MERCHANT_ID = os.getenv("SQUAD_MERCHANT_ID", "")   # prefix Squad requires on transfer references
+SQUAD_BASE_URL = os.getenv(
+    "SQUAD_BASE_URL",
+    "https://sandbox-api-d.squadco.com" if SQUAD_SECRET_KEY.startswith("sandbox_")
+    else "https://api-d.squadco.com",
+)
+if IS_PROD and not SQUAD_SECRET_KEY:
+    raise RuntimeError("SQUAD_SECRET_KEY must be set in production.")
+
+# ── Fees (platform revenue). Change via env, no code edit needed ────────────
+CLIENT_FEE_RATE  = Decimal(os.getenv("CLIENT_FEE_RATE",  "0.025"))
+ARTISAN_FEE_RATE = Decimal(os.getenv("ARTISAN_FEE_RATE", "0.025"))
+MAX_CLIENT_FEE   = Decimal(os.getenv("MAX_CLIENT_FEE",   "1250"))
+MAX_ARTISAN_FEE  = Decimal(os.getenv("MAX_ARTISAN_FEE",  "1250"))
+
+# ── Withdrawal limits ───────────────────────────────────────────────────────
+MIN_WITHDRAWAL = Decimal(os.getenv("MIN_WITHDRAWAL", "100"))
+MAX_WITHDRAWAL = Decimal(os.getenv("MAX_WITHDRAWAL", "500000"))
 
 CLOUDINARY_URL = os.getenv("CLOUDINARY_URL")
 
-# MySQL Database configuration
 DB_CONFIG = {
     "host":     os.getenv("DB_HOST"),
     "user":     os.getenv("DB_USER"),
@@ -28,85 +48,17 @@ DB_CONFIG = {
     "port":     int(os.getenv("DB_PORT", 3306)),
 }
 
-# Session configuration
-SESSION_COOKIE_SAMESITE = "None"
-SESSION_COOKIE_SECURE = False if ENV == "development" else True
-SESSION_COOKIE_HTTPONLY = True
-ALLOWED_ORIGINS = ["https://skillchain-frontend-omega.vercel.app", "http://localhost:5501", "http://localhost:5502", ]
+# ── Frontend / CORS ─────────────────────────────────────────────────────────
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://skillchain-frontend-omega.vercel.app").rstrip("/")
+_extra = [o.strip() for o in os.getenv("EXTRA_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+ALLOWED_ORIGINS = [
+    FRONTEND_URL,
+    "https://localhost", "capacitor://localhost", "http://localhost",   # Capacitor (Android / iOS)
+    "http://localhost:5501", "http://localhost:5502",                    # local dev
+] + _extra
 
-# Email configuration (MUST be before validation prints)
-MAIL_SERVER = "smtp.gmail.com"
-MAIL_PORT = 587
-MAIL_USE_TLS = True
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", "hamzlabs01@gmail.com")
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
-MAIL_DEFAULT_SENDER = os.getenv("MAIL_DEFAULT_SENDER", "hello@hamzlabs.com")
+# ── Email ───────────────────────────────────────────────────────────────────
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
-# NOW print validation
-print(f"\n{'='*60}")
-print(f"[CONFIG] Database Configuration:")
-print(f"  Host: {DB_CONFIG.get('host')}")
-print(f"  Port: {DB_CONFIG.get('port')}")
-print(f"  User: {DB_CONFIG.get('user')}")
-print(f"  Database: {DB_CONFIG.get('database')}")
-print(f"  Password: {'*' * len(DB_CONFIG.get('password', '')) if DB_CONFIG.get('password') else 'NOT SET'}")
-print(f"[CONFIG] Mail Configuration:")
-print(f"  Server: {MAIL_SERVER}")
-print(f"  Port: {MAIL_PORT}")
-print(f"  Username: {MAIL_USERNAME}")
-print(f"  Sender: {MAIL_DEFAULT_SENDER}")
-print(f"[CONFIG] Paystack Configuration:")
-print(f"  Secret Key: {'set (' + PAYSTACK_SECRET_KEY[:7] + '...)' if PAYSTACK_SECRET_KEY else 'NOT SET'}")
-print(f"{'='*60}\n")
-
-# Check for missing critical config
-if not DB_CONFIG.get('host'):
-    print("[WARNING] DB_HOST environment variable not set! Using None (will fail)")
-if not DB_CONFIG.get('user'):
-    print("[WARNING] DB_USER environment variable not set!")
-if not DB_CONFIG.get('password'):
-    print("[WARNING] DB_PASSWORD environment variable not set!")
-if not PAYSTACK_SECRET_KEY:
-    print("[WARNING] PAYSTACK_SECRET_KEY environment variable not set!")
-
-
-class Config:
-    """Base configuration class"""
-    SECRET_KEY = SECRET_KEY
-    PAYSTACK_SECRET_KEY = PAYSTACK_SECRET_KEY
-    PAYSTACK_PUBLIC_KEY = PAYSTACK_PUBLIC_KEY
-    PAYSTACK_BASE_URL = PAYSTACK_BASE_URL
-    DB_CONFIG = DB_CONFIG
-    SESSION_COOKIE_SAMESITE = SESSION_COOKIE_SAMESITE
-    SESSION_COOKIE_SECURE = SESSION_COOKIE_SECURE
-    MAIL_SERVER = MAIL_SERVER
-    MAIL_PORT = MAIL_PORT
-    MAIL_USE_TLS = MAIL_USE_TLS
-    MAIL_USERNAME = MAIL_USERNAME
-    MAIL_PASSWORD = MAIL_PASSWORD
-    MAIL_DEFAULT_SENDER = MAIL_DEFAULT_SENDER
-    SESSION_COOKIE_HTTPONLY = SESSION_COOKIE_HTTPONLY
-    ALLOWED_ORIGINS = ALLOWED_ORIGINS
-
-
-class DevelopmentConfig(Config):
-    DEBUG = True
-    TESTING = False
-
-
-class ProductionConfig(Config):
-    DEBUG = False
-    SESSION_COOKIE_SECURE = True
-
-
-class TestingConfig(Config):
-    TESTING = True
-    DEBUG = True
-
-
-config = {
-    "development": DevelopmentConfig,
-    "production": ProductionConfig,
-    "testing": TestingConfig,
-    "default": DevelopmentConfig
-}
+if not DB_CONFIG["host"] or not DB_CONFIG["password"]:
+    print("[CONFIG] WARNING: DB_HOST / DB_PASSWORD not set.")

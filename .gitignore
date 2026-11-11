@@ -16,3 +16,11 @@ __pycache__/
 # Virtual Environments
 venv/
 env/
+# Secrets / local
+.env.*
+*.pem
+*.key
+static/videos/
+uploads/
+*.db
+*.sqlite

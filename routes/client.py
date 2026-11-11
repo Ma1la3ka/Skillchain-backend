@@ -6,41 +6,30 @@ from utils import release_job_payment, release_gig_slot_payment
 
 client_bp = Blueprint('client', __name__, url_prefix='/api/client')
 
-# ── Fee constants ──────────────────────────────────────────────────────────────
-PLATFORM_FEE_RATE  = 0.05    # 5% total
-CLIENT_FEE_RATE    = 0.025   # 2.5% from client
-ARTISAN_FEE_RATE   = 0.025   # 2.5% from artisan
-MAX_PLATFORM_FEE   = 2500.00 # ₦2,500 total cap
-MAX_CLIENT_FEE     = 1250.00 # ₦1,250 per side cap
-MAX_ARTISAN_FEE    = 1250.00 # ₦1,250 per side cap
+# ── Fees: exact Decimal maths, rates and caps come from config (env) ──────────
+from decimal import Decimal, ROUND_HALF_UP
+from config import CLIENT_FEE_RATE, ARTISAN_FEE_RATE, MAX_CLIENT_FEE, MAX_ARTISAN_FEE
+
+
+def _q(x):
+    return Decimal(x).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
 def calculate_fees(amount):
-    """
-    Calculate platform fees with cap.
-    
-    Below ₦50,000: 2.5% each side
-    Above ₦50,000: capped at ₦1,250 each side (₦2,500 total)
-    
-    Returns dict with all fee breakdown values.
-    """
-    amount = float(amount)
-
-    client_fee   = min(round(amount * CLIENT_FEE_RATE,  2), MAX_CLIENT_FEE)
-    artisan_fee  = min(round(amount * ARTISAN_FEE_RATE, 2), MAX_ARTISAN_FEE)
-    platform_fee = client_fee + artisan_fee
-
-    client_pays  = round(amount + client_fee,  2)
-    artisan_gets = round(amount - artisan_fee, 2)
-
+    """Each side pays CLIENT/ARTISAN_FEE_RATE of the job amount, capped per side.
+    client_pays = amount + client_fee ; artisan_gets = amount - artisan_fee."""
+    amt = _q(Decimal(str(amount)))
+    client_fee  = min(_q(amt * CLIENT_FEE_RATE),  MAX_CLIENT_FEE)
+    artisan_fee = min(_q(amt * ARTISAN_FEE_RATE), MAX_ARTISAN_FEE)
     return {
-        "amount":       amount,
-        "client_fee":   client_fee,
-        "artisan_fee":  artisan_fee,
-        "platform_fee": platform_fee,
-        "client_pays":  client_pays,
-        "artisan_gets": artisan_gets,
+        "amount":       float(amt),
+        "client_fee":   float(client_fee),
+        "artisan_fee":  float(artisan_fee),
+        "platform_fee": float(client_fee + artisan_fee),
+        "client_pays":  float(amt + client_fee),
+        "artisan_gets": float(amt - artisan_fee),
     }
+
 
 @client_bp.route("/profile")
 def api_client_profile():
@@ -263,15 +252,15 @@ def api_post_job():
                     )
         conn.commit()
 
-        # ── Generate Paystack escrow collection link ──────────────
+        # ── Generate Squad escrow collection link ──────────────
         payment_info = None
         cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
         client_row = cur.fetchone()
         client_email = client_row["email"] if client_row else None
 
         if client_email:
-            from utils import paystack_create_collection_account
-            collection = paystack_create_collection_account(job_id, fees["client_pays"], client_email)
+            from utils import create_collection_link
+            collection = create_collection_link(job_id, fees["client_pays"], client_email)
 
             if collection:
                 cur.execute(
@@ -292,7 +281,7 @@ def api_post_job():
                     "reference":      collection.get("reference"),
                 }
             else:
-                print(f"[post-job] Could not generate Paystack payment link for job {job_id}")
+                print(f"[post-job] Could not generate Squad payment link for job {job_id}")
 
         return jsonify({
             "success":     True,
@@ -451,12 +440,12 @@ def api_review_gig_worker():
         if new_filled >= row["slots_needed"]:
             cur.execute("UPDATE jobs SET status='assigned' WHERE id=%s", (row["job_id"],))
 
-        # ── Generate this worker's own Paystack collection account ──
+        # ── Generate this worker's own Squad collection account ──
         cur.execute("SELECT email FROM users WHERE id = %s", (user_id,))
         client_row = cur.fetchone()
         if client_row and client_row.get("email"):
-            from utils import paystack_create_collection_account
-            collection = paystack_create_collection_account(
+            from utils import create_collection_link
+            collection = create_collection_link(
                 f"gig_{job_worker_id}", fees["client_pays"], client_row["email"]
             )
             if collection:
@@ -1264,8 +1253,8 @@ def api_delete_job():
 
 @client_bp.route("/retry-payment/<int:job_id>", methods=["POST"])
 def api_retry_payment(job_id):
-    """Regenerate a Paystack checkout link for a job whose payment account
-    failed to generate the first time (post-job succeeded, Paystack call failed)."""
+    """Regenerate a Squad checkout link for a job whose payment account
+    failed to generate the first time (post-job succeeded, Squad call failed)."""
     conn = get_db()
     cur  = conn.cursor(dictionary=True)
     try:
@@ -1281,8 +1270,8 @@ def api_retry_payment(job_id):
         if not job["email"]:
             return jsonify({"success": False, "message": "Client email missing."}), 400
 
-        from utils import paystack_create_collection_account
-        collection = paystack_create_collection_account(job_id, float(job["client_pays"]), job["email"])
+        from utils import create_collection_link
+        collection = create_collection_link(job_id, float(job["client_pays"]), job["email"])
 
         if not collection:
             return jsonify({"success": False, "message": "Could not generate payment link. Try again."}), 502
