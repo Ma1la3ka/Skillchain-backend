@@ -59,7 +59,7 @@ def _release(table, row, cur, extra_user_sql):
     ref = f"wallet_{table}_{rid}"
     cur.execute(
         f"""UPDATE {table} SET status='paid', paid_at=NOW(), transfer_reference=%s
-            WHERE id=%s AND status=('verified','pending_verification) AND paid_at IS NULL AND escrow_paid=1""",
+            WHERE id=%s AND status=('verified','pending_verification') AND paid_at IS NULL AND escrow_paid=1""",
         (ref, rid))
     if cur.rowcount != 1:
         return None
