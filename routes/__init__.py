@@ -15,6 +15,7 @@ from .chat import chat_bp
 from .heartbeat import heartbeat_bp
 from .account import account_bp
 from .notifications import notify_bp
+from .notif_api import notifs_bp
 
 blueprints = [
     auth_bp,
@@ -30,6 +31,7 @@ blueprints = [
     chat_bp,
     heartbeat_bp,
     account_bp,
-    notify_bp
+    notify_bp,
+    notifs_bp
     
 ]

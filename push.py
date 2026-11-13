@@ -72,10 +72,34 @@ def _naira(x):
         return ""
 
 
+def _store(ids, title, body, data):
+    """Save the notification so the in-app bell can show it, even if the push never reaches the phone.
+    Chat messages are skipped: the Inbox tab already has its own unread badge."""
+    data = data or {}
+    if data.get("type") == "chat" or not ids:
+        return
+    conn = get_db()
+    cur = conn.cursor()
+    try:
+        cur.executemany(
+            "INSERT INTO user_notifications (user_id, role, type, title, body, job_id) VALUES (%s,%s,%s,%s,%s,%s)",
+            [(i, data.get("role") or "client", data.get("type") or "update", title[:120], body[:300], data.get("job_id")) for i in ids])
+        conn.commit()
+    finally:
+        cur.close()
+        conn.close()
+
+
 def send_many(user_ids, title, body, data=None, skip=None):
-    """Send to every registered device of these users (never to `skip`, the person who acted)."""
+    """Save for the bell, then push to every registered device (never to `skip`, the person who acted)."""
     ids = {int(u) for u in user_ids if str(u).isdigit() and (skip is None or int(u) != int(skip))}
-    if not ids or not _ready():
+    if not ids:
+        return
+    try:
+        _store(ids, title, body, data)
+    except Exception as e:
+        print(f"[push] could not store notification: {e}")
+    if not _ready():
         return
     marks = ",".join(["%s"] * len(ids))
     tokens = _query(f"SELECT token FROM device_tokens WHERE user_id IN ({marks})", tuple(ids))
