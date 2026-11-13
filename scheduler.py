@@ -7,6 +7,7 @@ import os
 from apscheduler.schedulers.background import BackgroundScheduler
 from database_helper import get_db
 import squad_service
+import push
 from utils import release_job_payment, release_gig_slot_payment, refund_payout, mark_payout_success
 from routes.webhook import mark_escrow_paid
 
@@ -39,6 +40,8 @@ def auto_release(conn, cur):
                 ref = fn(row, cur)
                 conn.commit()
                 print(f"[auto-release] {table} {row['id']} -> {ref}")
+                if ref and table == "jobs":
+                    push.spawn(push.notify_released, row["id"], True)
             except Exception as e:
                 conn.rollback()
                 print(f"[auto-release] {table} {row['id']} failed: {e}")

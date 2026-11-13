@@ -3,6 +3,7 @@ from decimal import Decimal
 from flask import Blueprint, request, jsonify
 from database_helper import get_db
 import squad_service
+import push
 from utils import money
 
 webhook_bp = Blueprint('webhook', __name__, url_prefix='/api')
@@ -34,7 +35,11 @@ def mark_escrow_paid(conn, cur, reference, paid_kobo):
         f"""UPDATE {table} SET escrow_paid=1, escrow_paid_at=NOW(), escrow_amount_received=%s
             WHERE id=%s AND escrow_paid=0""", (str(received), row["id"]))
     conn.commit()
-    return "ok" if cur.rowcount == 1 else "already_paid"
+    if cur.rowcount == 1:
+        if table == "jobs":
+            push.spawn(push.notify_escrow, row["id"])
+        return "ok"
+    return "already_paid"
 
 
 @webhook_bp.route("/squad/webhook", methods=["POST"])

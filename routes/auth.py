@@ -1,6 +1,7 @@
 """Authentication routes"""
 from flask import Blueprint, request, render_template, jsonify, g
 import secrets
+import re
 from security import issue_token
 from config import FRONTEND_URL
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -129,6 +130,12 @@ def register():
         errors["password"] = "Password must be at least 6 characters."
     if role == "worker" and not trade:
         errors["trade"] = "Please select your trade."
+    trade_other = request.form.get("trade_other", "").strip()
+    if role == "worker" and trade and trade.strip().lower() == "other":
+        if not re.fullmatch(r"[A-Za-z][A-Za-z &/.'\-]{1,39}", trade_other):
+            errors["trade"] = "Please tell us your trade (2 to 40 letters)."
+        else:
+            trade = trade_other.title()
     if role == "client":
         trade = None
     if errors:

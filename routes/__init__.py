@@ -13,6 +13,8 @@ from .banks        import banks_bp
 from .switch_role  import switch_bp   
 from .chat import chat_bp
 from .heartbeat import heartbeat_bp
+from .account import account_bp
+from .notifications import notify_bp
 
 blueprints = [
     auth_bp,
@@ -26,6 +28,8 @@ blueprints = [
     banks_bp,
     switch_bp,  
     chat_bp,
-    heartbeat_bp
+    heartbeat_bp,
+    account_bp,
+    notify_bp
     
 ]

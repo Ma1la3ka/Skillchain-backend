@@ -120,7 +120,13 @@ def activate_worker():
         "Mechanic", "Electrician", "Plumber", "Carpenter", "Painter",
         "Welder", "Tailor", "Mason", "HVAC Technician", "Other"
     }
-    if trade not in VALID_TRADES:
+    if trade == "Other":
+        import re
+        other = str(data.get("trade_other", "")).strip()
+        if not re.fullmatch(r"[A-Za-z][A-Za-z &/.'\-]{1,39}", other):
+            return jsonify({"success": False, "message": "Please tell us your trade (2 to 40 letters)."}), 400
+        trade = other.title()
+    elif trade not in VALID_TRADES:
         return jsonify({"success": False, "message": "Invalid trade selected"}), 400
 
     conn = get_db()

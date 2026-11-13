@@ -43,7 +43,7 @@ LIMITS = {
     "/resend-verification": (5, 3600), "/forgot-password": (5, 3600),
     "/reset-password": (10, 600), "/reset-password-final": (10, 600),
     "/api/worker/reset-pin": (10, 600), "/api/worker/forgot-pin": (5, 3600),
-    "/api/worker/withdraw": (10, 600), "/api/verify-account": (30, 600),
+    "/api/worker/withdraw": (10, 600), "/api/account/delete": (5, 3600), "/api/verify-account": (30, 600),
 }
 _hits, _lock = {}, threading.Lock()
 

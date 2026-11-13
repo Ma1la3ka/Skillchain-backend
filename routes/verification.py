@@ -59,12 +59,7 @@ def api_verify_job():
             in_range = distance <= radius
             result = "pass" if in_range else "fail"
 
-            video_path = None
-            if video:
-                os.makedirs("static/videos", exist_ok=True)
-                filename = f"proof_jw{job_worker_id}_{uuid.uuid4().hex[:8]}.webm"
-                video_path = os.path.join("static/videos", filename)
-                video.save(video_path)
+            video_path = None   # proof video lives on Cloudinary (uploaded via /api/job/upload-media)
 
             new_status = "verified" if in_range else "pending_verification"
             if in_range:
@@ -119,12 +114,9 @@ def api_verify_job():
         in_range = distance <= radius
         result = "pass" if in_range else "fail"
 
-        video_path = None
-        if video:
-            os.makedirs("static/videos", exist_ok=True)
-            filename = f"proof_{job_id}_{uuid.uuid4().hex[:8]}.webm"
-            video_path = os.path.join("static/videos", filename)
-            video.save(video_path)
+        cur.execute("SELECT file_path FROM job_media WHERE job_id = %s AND media_type = 'video' ORDER BY id DESC LIMIT 1", (job_id,))
+        vrow = cur.fetchone()
+        video_path = vrow["file_path"] if vrow else None   # Cloudinary URL (Render's disk is wiped on every deploy)
 
         new_status = "verified" if in_range else "pending_verification"
         if in_range:
