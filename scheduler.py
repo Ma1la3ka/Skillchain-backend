@@ -8,6 +8,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from database_helper import get_db
 import squad_service
 import push
+import cases_logic
 from utils import release_job_payment, release_gig_slot_payment, refund_payout, mark_payout_success
 from routes.webhook import mark_escrow_paid
 
@@ -67,6 +68,19 @@ def requery_payouts(conn, cur):
 
 
 @_db_job
+def escalate_fixes(conn, cur):
+    done = cases_logic.escalate_overdue_fixes(cur)
+    conn.commit()
+    for case_id, job_id in done:
+        job = push.job_info(job_id)
+        for uid, role in ((job.get("client_id"), "client"), (job.get("worker_id"), "worker")):
+            if uid:
+                push.spawn(push.send_many, [uid], "Fix request escalated",
+                           f"“{job.get('title')}”: the fix request was not completed in time and went to support for a decision.",
+                           {"role": role, "type": "case", "job_id": job_id}, None)
+
+
+@_db_job
 def reconcile_payments(conn, cur):
     for table in ("jobs", "job_workers"):
         cur.execute(f"""SELECT escrow_reference FROM {table}
@@ -87,6 +101,7 @@ def start_scheduler():
     _scheduler.add_job(auto_release,        "interval", minutes=10, id="auto_release", **kw)
     _scheduler.add_job(requery_payouts,     "interval", minutes=2,  id="requery_payouts", **kw)
     _scheduler.add_job(reconcile_payments,  "interval", minutes=5,  id="reconcile_payments", **kw)
+    _scheduler.add_job(escalate_fixes,       "interval", minutes=10, id="escalate_fixes", **kw)
     _scheduler.start()
     print("[scheduler] started")
     return _scheduler

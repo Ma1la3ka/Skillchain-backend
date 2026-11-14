@@ -16,6 +16,8 @@ from .heartbeat import heartbeat_bp
 from .account import account_bp
 from .notifications import notify_bp
 from .notif_api import notifs_bp
+from .cases import cases_bp
+from .admin import admin_bp
 
 blueprints = [
     auth_bp,
@@ -32,6 +34,8 @@ blueprints = [
     heartbeat_bp,
     account_bp,
     notify_bp,
-    notifs_bp
+    notifs_bp,
+    cases_bp,
+    admin_bp
     
 ]

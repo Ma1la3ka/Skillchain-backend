@@ -43,7 +43,8 @@ LIMITS = {
     "/resend-verification": (5, 3600), "/forgot-password": (5, 3600),
     "/reset-password": (10, 600), "/reset-password-final": (10, 600),
     "/api/worker/reset-pin": (10, 600), "/api/worker/forgot-pin": (5, 3600),
-    "/api/worker/withdraw": (10, 600), "/api/account/delete": (5, 3600), "/api/verify-account": (30, 600),
+    "/api/worker/withdraw": (10, 600), "/api/account/delete": (5, 3600), "/api/admin/resolve": (20, 3600), "/api/admin/suspend": (20, 3600), "/api/admin/refund/done": (30, 3600),
+    "/api/cases/request-fix": (10, 3600), "/api/cases/dispute": (10, 3600), "/api/cases/late": (10, 3600), "/api/cases/evidence": (40, 3600), "/api/verify-account": (30, 600),
 }
 _hits, _lock = {}, threading.Lock()
 
@@ -61,6 +62,32 @@ def _allow(key, limit, window):
             for k in list(_hits)[:5000]:
                 _hits.pop(k, None)
         return True
+
+
+_susp = {"ts": 0.0, "ids": set()}
+
+
+def refresh_suspended():
+    """Suspended accounts are blocked on every API call. Reloaded from the DB at most once a minute."""
+    try:
+        from database_helper import get_db
+        conn = get_db()
+        cur = conn.cursor()
+        try:
+            cur.execute("SELECT user_id FROM user_flags WHERE suspended = 1")
+            _susp["ids"] = {int(r[0]) for r in cur.fetchall()}
+        finally:
+            cur.close()
+            conn.close()
+    except Exception as e:
+        print(f"[security] suspended list not refreshed: {e}")
+    _susp["ts"] = time.time()
+
+
+def _is_suspended(uid):
+    if time.time() - _susp["ts"] > 60:
+        refresh_suspended()
+    return uid in _susp["ids"]
 
 
 def _json_body():
@@ -101,6 +128,9 @@ def _gate():
 
     if g.uid is None:
         return jsonify({"success": False, "error": "Authentication required.", "auth_required": True}), 401
+
+    if _is_suspended(g.uid):
+        return jsonify({"success": False, "error": "Your account is suspended. Please contact support.", "suspended": True}), 403
 
     if path not in TARGET_USER_ENDPOINTS:
         for cid in _claimed_ids(body):
