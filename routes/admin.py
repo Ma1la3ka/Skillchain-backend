@@ -1,5 +1,6 @@
 """Admin API: disputes, refunds, users, jobs, payments. Every route requires a login token AND a row in `admins`.
 Money decisions also require the admin's password again and are written to admin_audit."""
+import os
 from datetime import datetime
 from decimal import Decimal
 from functools import wraps
@@ -46,21 +47,46 @@ def _db(work, write=False):
         conn.close()
 
 
-def admin_only(fn):
-    @wraps(fn)
-    def wrapper(*a, **k):
-        conn = get_db()
-        cur = conn.cursor()
-        try:
-            cur.execute("SELECT 1 FROM admins WHERE user_id = %s", (g.uid,))
-            ok = cur.fetchone() is not None
-        finally:
-            cur.close()
-            conn.close()
-        if not ok:
-            return jsonify({"success": False, "error": "Admins only."}), 403
-        return fn(*a, **k)
-    return wrapper
+def _owner_emails():
+    """Owners are set in Render (ADMIN_EMAILS=a@x.com,b@y.com). Owners can add and remove other admins."""
+    return {e.strip().lower() for e in os.getenv("ADMIN_EMAILS", "").split(",") if e.strip()}
+
+
+def _level(cur, uid):
+    """None, 'admin' or 'owner'. Anyone whose VERIFIED login email is listed counts as admin."""
+    cur.execute("""SELECT LOWER(u.email) AS email,
+                          (EXISTS(SELECT 1 FROM admins a WHERE a.user_id = u.id)
+                           OR EXISTS(SELECT 1 FROM admin_emails e WHERE e.email = LOWER(u.email))) AS listed
+                   FROM users u WHERE u.id = %s""", (uid,))
+    row = cur.fetchone()
+    if not row:
+        return None
+    if row["email"] in _owner_emails():
+        return "owner"
+    return "admin" if row["listed"] else None
+
+
+def _guard(owner):
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*a, **k):
+            conn = get_db()
+            cur = conn.cursor(dictionary=True)
+            try:
+                lvl = _level(cur, g.uid)
+            finally:
+                cur.close()
+                conn.close()
+            if not lvl or (owner and lvl != "owner"):
+                return jsonify({"success": False, "error": "Owners only." if lvl else "Admins only."}), 403
+            g.admin_level = lvl
+            return fn(*a, **k)
+        return wrapper
+    return deco
+
+
+admin_only = _guard(False)
+owner_only = _guard(True)
 
 
 def _check_password(cur):
@@ -82,7 +108,7 @@ def _naira(x):
 @admin_bp.route("/me")
 @admin_only
 def me():
-    return jsonify({"success": True, "admin": True})
+    return jsonify({"success": True, "admin": True, "owner": g.admin_level == "owner"})
 
 
 @admin_bp.route("/overview")
@@ -291,8 +317,7 @@ def suspend():
     def work(cur):
         _check_password(cur)
         uid = int(d.get("user_id") or 0)
-        cur.execute("SELECT 1 AS a FROM admins WHERE user_id = %s", (uid,))
-        if cur.fetchone():
+        if _level(cur, uid):
             raise cl.CaseError("Admins cannot be suspended here.", 409)
         flag = 1 if d.get("suspend") else 0
         reason = str(d.get("reason", ""))[:300]
@@ -341,3 +366,51 @@ def payments():
                        FROM wallet_ledger l JOIN users u ON u.id = l.user_id ORDER BY l.id DESC LIMIT 60""")
         return {"payouts": payouts, "ledger": cur.fetchall()}
     return _db(work)
+
+
+@admin_bp.route("/admins")
+@admin_only
+def admins_list():
+    def work(cur):
+        cur.execute("""SELECT e.email, e.created_at, u.id AS user_id, u.name FROM admin_emails e
+                       LEFT JOIN users u ON LOWER(u.email) = e.email ORDER BY e.created_at""")
+        return {"owners": sorted(_owner_emails()), "admins": cur.fetchall(), "you_are_owner": g.admin_level == "owner"}
+    return _db(work)
+
+
+def _clean_email(raw):
+    email = str(raw or "").strip().lower()
+    if "@" not in email or len(email) > 190 or " " in email:
+        raise cl.CaseError("Enter a valid email address.")
+    return email
+
+
+@admin_bp.route("/admins/add", methods=["POST"])
+@owner_only
+def admins_add():
+    d = request.get_json(silent=True) or {}
+
+    def work(cur):
+        _check_password(cur)
+        email = _clean_email(d.get("email"))
+        cur.execute("INSERT INTO admin_emails (email, added_by) VALUES (%s, %s) ON DUPLICATE KEY UPDATE added_by = VALUES(added_by)", (email, g.uid))
+        _audit(cur, "admin_add", email, "")
+        return {"success": True}
+    return _db(work, write=True)
+
+
+@admin_bp.route("/admins/remove", methods=["POST"])
+@owner_only
+def admins_remove():
+    d = request.get_json(silent=True) or {}
+
+    def work(cur):
+        _check_password(cur)
+        email = _clean_email(d.get("email"))
+        if email in _owner_emails():
+            raise cl.CaseError("Owners are set in Render (ADMIN_EMAILS). Remove them there.", 409)
+        cur.execute("DELETE FROM admin_emails WHERE email = %s", (email,))
+        cur.execute("DELETE FROM admins WHERE user_id IN (SELECT id FROM users WHERE LOWER(email) = %s)", (email,))
+        _audit(cur, "admin_remove", email, "")
+        return {"success": True}
+    return _db(work, write=True)
